@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+*.egg-info/
+.DS_Store
+tests/fixtures/sample.docx
+tests/fixtures/rich_sample.docx
+tests/fixtures/with_image.docx
+tests/fixtures/*.png
+tests/fixtures/*.doc
+agent-tools/

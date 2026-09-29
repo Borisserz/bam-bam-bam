@@ -1,0 +1,30 @@
+[project]
+name = "ingest-parse"
+version = "0.1.0"
+description = "Parsing-only module for txt/doc/docx → canonical ParsedDocument (Docling)."
+readme = "README.md"
+authors = [
+    { name = "Boris Serzh", email = "borisserzh5@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "docling>=2.131.0",
+    "pydantic>=2.13.5",
+]
+
+[project.scripts]
+ingest-parse = "ingest_parse.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.12.20,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "python-docx>=1.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
