@@ -1,4 +1,4 @@
-"""CLI: python -m ingest_parse path/to/file.docx → JSON summary."""
+"""CLI: python -m ingest_parse file [--full]."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         doc = parse_document(args.path)
-    except Exception as exc:  # CLI: показать ошибку и ненулевой код
+    except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -49,8 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         "text_preview": plain[:500],
         "text_chars": len(plain),
         "warnings": doc.warnings,
-        "block_types": [b.type for b in doc.blocks],
-        "block_labels": [getattr(b, "label", None) for b in doc.blocks],
+        "block_labels": [b.label for b in doc.blocks],
     }
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 0

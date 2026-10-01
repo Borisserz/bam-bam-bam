@@ -1,4 +1,0 @@
-# sample fixture for UTF-8 text parse
-Sample document for ingest_parse.
-
-This is the second paragraph with enough text to assert a non-empty parse.

@@ -1,4 +1,4 @@
-"""Определение формата по расширению файла."""
+"""Формат по расширению файла."""
 
 from __future__ import annotations
 
@@ -15,11 +15,10 @@ _EXT_MAP: dict[str, SupportedFormat] = {
 
 
 class UnsupportedFormatError(ValueError):
-    """Формат вне whitelist stage-1 parse (txt/doc/docx)."""
+    pass
 
 
 def detect_format(path: str | Path) -> SupportedFormat:
-    """Вернуть канонический формат по суффиксу; иначе понятная ошибка."""
     suffix = Path(path).suffix.lower()
     fmt = _EXT_MAP.get(suffix)
     if fmt is None:
