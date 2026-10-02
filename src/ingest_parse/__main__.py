@@ -63,7 +63,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.output:
-        args.output.write_text(md, encoding="utf-8", newline="\n")  # Windows: без CRLF
+        try:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(md, encoding="utf-8", newline="\n")  # Windows: без CRLF
+        except OSError as exc:
+            print(f"error: cannot write {args.output}: {exc}", file=sys.stderr)
+            return 1
     else:
         sys.stdout.flush()
         sys.stdout.buffer.write(md.encode("utf-8"))  # не кодировка консоли (cp1251 на Windows)
