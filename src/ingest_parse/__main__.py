@@ -1,57 +1,73 @@
-"""CLI: python -m ingest_parse file [--full]."""
+"""CLI: python -m ingest_parse file [-o out.md] [--media-dir DIR] [--vision | --vision-force]."""
 
 from __future__ import annotations
 
 import argparse
-import json
+import os
 import sys
 from pathlib import Path
 
-from ingest_parse.parse import parse_document
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="python -m ingest_parse",
-        description="Parse txt/doc/docx into canonical ParsedDocument JSON (no chunk/embed).",
-    )
-    p.add_argument("path", type=Path, help="Path to .txt / .doc / .docx")
-    p.add_argument(
-        "--full",
-        action="store_true",
-        help="Print full ParsedDocument JSON (default: compact summary).",
-    )
-    return p
+from ingest_parse.parse import parse_to_markdown
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    p = argparse.ArgumentParser(
+        prog="ingest-parse", description="Parse txt/doc/docx/docm/rtf into Markdown."
+    )
+    p.add_argument("path", type=Path, help="Path to .txt / .doc / .docx / .docm / .rtf")
+    p.add_argument("-o", "--output", type=Path, help="Write Markdown to file (default: stdout).")
+    p.add_argument(
+        "--media-dir",
+        type=Path,
+        help="Write pictures here (default with -o: <out dir>/media/<document name>/; without -o: none).",
+    )
+    p.add_argument(
+        "--vision",
+        action="store_true",
+        help="Describe pictures via VLM (VISION_API_BASE_URL); block above each image, cached.",
+    )
+    p.add_argument(
+        "--vision-force", action="store_true", help="Like --vision, but re-ask the API for every picture."
+    )
+    args = p.parse_args(argv)
+
+    vision = args.vision or args.vision_force
+    if vision:
+        from ingest_parse.vision import VisionConfig, VisionConfigError
+
+        try:
+            VisionConfig.from_env()
+        except VisionConfigError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+    media_dir = args.media_dir
+    if media_dir is None and args.output:
+        media_dir = args.output.parent / "media" / args.path.stem
+    media_link = None
+    if media_dir is not None and args.output:
+        # ссылки в out.md — относительно его папки
+        media_link = Path(os.path.relpath(media_dir, args.output.parent)).as_posix()
+
     try:
-        doc = parse_document(args.path)
+        md = parse_to_markdown(
+            args.path,
+            media_dir=media_dir,
+            media_link=media_link,
+            vision=args.vision,
+            vision_force=args.vision_force,
+            links_base=args.output.parent if args.output else None,
+        )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    if args.full:
-        print(doc.model_dump_json(indent=2, ensure_ascii=False))
-        return 0
-
-    plain = doc.plain_text()
-    summary = {
-        "source_path": doc.source_path,
-        "source_sha256": doc.source_sha256,
-        "format": doc.format,
-        "title": doc.title,
-        "parser": doc.parser,
-        "parser_version": doc.parser_version,
-        "canon_schema": doc.canon_schema,
-        "block_count": len(doc.blocks),
-        "text_preview": plain[:500],
-        "text_chars": len(plain),
-        "warnings": doc.warnings,
-        "block_labels": [b.label for b in doc.blocks],
-    }
-    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    if args.output:
+        args.output.write_text(md, encoding="utf-8", newline="\n")  # Windows: без CRLF
+    else:
+        sys.stdout.flush()
+        sys.stdout.buffer.write(md.encode("utf-8"))  # не кодировка консоли (cp1251 на Windows)
+        sys.stdout.buffer.flush()
     return 0
 
 

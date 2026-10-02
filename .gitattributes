@@ -1,0 +1,19 @@
+* text=auto eol=lf
+
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.txt -text
+*.rtf -text
+*.lock text eol=lf
+
+*.doc binary
+*.docx binary
+*.docm binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.emf binary
+*.wmf binary
+*.pdf binary
+*.zip binary
