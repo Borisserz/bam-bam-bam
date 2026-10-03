@@ -21,7 +21,7 @@ def _size(path: Path) -> tuple[int, int] | None:
 
 
 def image_kind(path: Path, alt: str) -> str:
-    """logo | photo | diagram | table_scan | chart | equation_img | unknown."""
+    """logo | photo | diagram | table_scan | text_scan | chart | equation_img | unknown."""
     head = alt.strip().lower()
     if head.startswith(("формула", "объект")):
         return "equation_img"
@@ -29,6 +29,8 @@ def image_kind(path: Path, alt: str) -> str:
         return "chart"
     if path.stem.startswith("page-"):
         return "diagram"
+    if path.stem.startswith("scan-"):
+        return "text_scan"
     if head.startswith("таблица"):
         return "table_scan"
     if "схем" in head or "диаграмм" in head:

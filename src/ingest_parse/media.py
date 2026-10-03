@@ -1,4 +1,4 @@
-"""Картинки документа → img-NNN.<ext>, страницы со схемами → page-NNN.png; ссылки ![подпись](…)."""
+"""Картинки документа → img-NNN.<ext>, страницы со схемами → page-NNN.png, сканы PDF → scan-NNN.png."""
 
 from __future__ import annotations
 
@@ -48,6 +48,13 @@ class MediaWriter:
         self.directory.mkdir(parents=True, exist_ok=True)
         image.save(self.directory / name)
         return self._link(name)
+
+    def save_scan(self, image: Any, number: int) -> tuple[Path, str]:
+        """PNG страницы-скана PDF: scan-NNN.png (не page-NNN — те для схем Word); путь к файлу и ссылка."""
+        name = f"scan-{number:03d}.png"
+        self.directory.mkdir(parents=True, exist_ok=True)
+        image.save(self.directory / name)
+        return self.directory / name, self._link(name)
 
     def _link(self, name: str) -> str:
         return f"{self.link_base}/{name}" if self.link_base else name

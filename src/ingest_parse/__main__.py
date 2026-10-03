@@ -1,4 +1,5 @@
-"""CLI: python -m ingest_parse file (.txt/.doc/.docx/.docm/.rtf/.pdf) [-o out.md] [--media-dir DIR] [--vision | --vision-force]."""
+"""CLI: python -m ingest_parse file (.txt/.doc/.docx/.docm/.rtf/.pdf) [-o out.md] [--media-dir DIR]
+[--vision | --vision-force] [--ocr-fallback]."""
 
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from ingest_parse.pdf_triage import PdfPageWarning
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="ingest-parse",
-        description="Parse txt/doc/docx/docm/rtf/pdf into Markdown (pdf: born-digital only, no OCR).",
+        description="Parse txt/doc/docx/docm/rtf/pdf into Markdown (pdf scans: --vision or --ocr-fallback).",
     )
     p.add_argument("path", type=Path, help="Path to .txt / .doc / .docx / .docm / .rtf / .pdf")
     p.add_argument("-o", "--output", type=Path, help="Write Markdown to file (default: stdout).")
@@ -31,6 +32,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--vision-force", action="store_true", help="Like --vision, but re-ask the API for every picture."
+    )
+    p.add_argument(
+        "--ocr-fallback",
+        action="store_true",
+        help="Scanned PDF pages: run RapidOCR if --vision is off or the vision API fails (extra: ocr).",
     )
     args = p.parse_args(argv)
 
@@ -62,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
                 vision=args.vision,
                 vision_force=args.vision_force,
                 links_base=args.output.parent if args.output else None,
+                ocr_fallback=True if args.ocr_fallback else None,
             )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

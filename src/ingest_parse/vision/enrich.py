@@ -19,6 +19,7 @@ from ingest_parse.vision.prompts import build_prompt, parse_sections
 from ingest_parse.vision.taxonomy import image_kind, prompt_mode
 
 _IMAGE = re.compile(r"!\[(?P<alt>(?:\\.|[^\]\\])*)\]\((?:<(?P<angle>[^>]+)>|(?P<plain>[^)\s]+))\)")
+_SCAN = re.compile(r'<!-- pdf-scan:begin page="(\d+)".*?<!-- pdf-scan:end page="\1" -->', re.S)
 
 
 class Completer(Protocol):
@@ -77,6 +78,10 @@ def enrich_markdown(
         m.group("id")
         for m in BLOCK.finditer(md)
         if not force and 'status="error"' not in m.group("attrs")
+    }
+    # страницы-сканы PDF уже прошли VLM / OCR при разборе (с тем же force) — второй раз не описываем
+    done |= {
+        Path(m.group("angle") or m.group("plain")).stem for scan in _SCAN.finditer(md) for m in _IMAGE.finditer(scan.group(0))
     }
     md = BLOCK.sub(lambda m: m.group(0) if m.group("id") in done else "", md)
 

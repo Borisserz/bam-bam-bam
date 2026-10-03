@@ -17,12 +17,12 @@ SCAN_COVERAGE = 0.5  # доля площади страницы под раст�
 GARBAGE_SHARE = 0.3  # доля U+FFFD: текстовый слой есть, но нечитаемый
 INVISIBLE_SHARE = 0.8  # доля невидимых текстовых объектов (render mode 3) — OCR-слой поверх скана
 
+SCAN_PLACEHOLDER = "<!-- page {n}: scanned / no usable text layer; skipped -->"  # pdf_scan заменяет блоком
 _PLACEHOLDER = {
-    "full_scan": "<!-- page {n}: scanned / no usable text layer; skipped -->",
+    "full_scan": SCAN_PLACEHOLDER,
     "blank": "<!-- page {n}: blank; skipped -->",
 }
-_WARNING = {
-    "full_scan": "pdf page {n} classified as full_scan; placeholder emitted",
+_WARNING = {  # full_scan предупреждает pdf_scan — с тем, чем кончилось: vision / ocr / заглушка
     "blank": "pdf page {n} classified as blank; skipped",
     "hybrid": "pdf page {n} classified as hybrid (scan with OCR text layer); text layer used as is",
 }
@@ -30,7 +30,7 @@ _VECTOR_ONLY = "pdf page {n} has only vector graphics, no text; kept only if Doc
 
 
 class PdfPageWarning(UserWarning):
-    """Страница PDF без пригодного текста: в Markdown — комментарий-заглушка, не OCR."""
+    """Страница PDF без пригодного текста: скан (vision / OCR / заглушка), пустая, только векторная графика."""
 
 
 @dataclass(frozen=True)

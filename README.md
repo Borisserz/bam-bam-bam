@@ -2,8 +2,9 @@
 
 `.txt` / `.doc` / `.docx` / `.docm` / `.rtf` / `.pdf` → **Markdown-строка** для RAG (chunking, embeddings,
 цитирование) + папка `media/` с картинками. DOCX и PDF разбирает [Docling](https://github.com/docling-project/docling)
-(`docling-slim`, без OCR); `.doc` и `.rtf` сначала конвертируются LibreOffice в `.docx`. PDF — только
-**born-digital** (с текстовым слоем), Markdown того же вида, что из `.docx`.
+(`docling-slim`, без OCR); `.doc` и `.rtf` сначала конвертируются LibreOffice в `.docx`. Born-digital PDF
+(с текстовым слоем) даёт Markdown того же вида, что из `.docx`; страницы-сканы — PNG + текст от VLM (`--vision`)
+или OCR (`--ocr-fallback`), иначе честная заглушка.
 Опционально (`--vision`) над каждой картинкой ставится описание от VLM.
 
 ## Установка (Windows)
@@ -48,6 +49,7 @@ uv run ingest-parse report.docx                          # Markdown в stdout (�
 uv run ingest-parse report.docx -o out\report.md         # + картинки в out\media\report\
 uv run ingest-parse report.rtf  -o out\report.md
 uv run ingest-parse report.pdf  -o out\report.md          # born-digital PDF
+uv run ingest-parse scan.pdf    -o out\scan.md --vision   # сканы: страница → VLM (рабочий ПК)
 uv run ingest-parse report.docx -o out\report.md --media-dir D:\m   # картинки в D:\m
 ```
 
@@ -67,7 +69,8 @@ md: str = parse_document("report.docx")
 md = parse_document(data, filename="report.docx")                  # bytes: расширение обязательно
 md = parse_document("report.docx", media_dir="out/media/report")   # + картинки в папку
 md = parse_document("report.docx", media_dir="out/media/report", vision=True)  # + описания VLM
-md = parse_document("report.pdf", media_dir="out/media/report")    # сканы → PdfPageWarning + заглушки
+md = parse_document("report.pdf", media_dir="out/media/report")    # сканы → scan-NNN.png + заглушка
+md = parse_document("scan.pdf", media_dir="out/media/scan", vision=True)  # сканы → текст от VLM
 ```
 
 Ошибки: `UnsupportedFormatError` (подкласс `ValueError`), `FileNotFoundError`, `ValueError` (bytes без `filename`,
@@ -83,7 +86,7 @@ md = parse_document("report.pdf", media_dir="out/media/report")    # сканы 
 | `.docm` | как `.docx`, макросы игнорируются (LibreOffice не нужен) |
 | `.doc` | LibreOffice → `.docx` → как выше |
 | `.rtf` | LibreOffice → `.docx` → как выше |
-| `.pdf` | born-digital: тот же Markdown, что из `.docx` (см. [PDF](#pdf)); страницы-сканы — комментарий-заглушка |
+| `.pdf` | born-digital: тот же Markdown, что из `.docx`; страницы-сканы — `scan-NNN.png` + текст VLM / OCR (см. [PDF](#pdf)) |
 | `.txt` | абзацы по пустым строкам, текст как есть |
 
 **Заголовки DOCX**: стиль Word «Заголовок N» / «Название», а также набранные руками:
@@ -162,9 +165,9 @@ Equation 3.0 / MathType — OLE без текста: вместо них ссы�
 
 ### PDF
 
-Только **born-digital** PDF — экспорт из Word / LibreOffice / LaTeX, где текст выделяется мышью. Docling
+Страницы с текстовым слоем (экспорт из Word / LibreOffice / LaTeX, где текст выделяется мышью) разбирает Docling
 (модели раскладки и таблиц, OCR выключен) → тот же обход, что для `.docx`: заголовки, списки, GFM-таблицы, подписи,
-картинки `img-NNN.png`, `--vision`.
+картинки `img-NNN.png`, `--vision`. Страницы-сканы рендерятся в PNG и уходят на VLM (см. [Сканы](#сканы-в-pdf)).
 
 ```powershell
 uv run ingest-parse report.pdf -o out\report.md
@@ -182,11 +185,57 @@ TableFormer из `docling-models`) в `%USERPROFILE%\.cache\huggingface\hub\`, �
 |---|---|---|
 | digital — есть текстовый слой | разбирается как обычно | — |
 | hybrid — скан с невидимым OCR-слоем | разбирается по этому слою как есть | `warning: pdf page N classified as hybrid …` |
-| full_scan — картинка без текста или мусорный слой | `<!-- page N: scanned / no usable text layer; skipped -->` | `warning: pdf page N classified as full_scan; placeholder emitted` |
+| full_scan — картинка без текста или мусорный слой | блок `pdf-scan` (см. ниже) | `warning: pdf page N classified as full_scan; rendered + vision` / `+ ocr` / `placeholder emitted (…)` |
 | blank — пустая | ничего | `warning: pdf page N classified as blank; skipped` |
 
-PDF целиком из сканов / пустых страниц → Markdown из одних заглушек (не пустая строка), код выхода `0`.
-Запароленный PDF → `ValueError` («password-protected»).
+PDF целиком из сканов / пустых страниц → Docling не запускается, только блоки сканов и заглушки (не пустая
+строка), код выхода `0`. Запароленный PDF → `ValueError` («password-protected»).
+
+#### Сканы в PDF
+
+Каждая страница `full_scan` рендерится `pypdfium2` (масштаб 2) в `media/…/scan-NNN.png` (NNN — номер страницы
+с 1) и на месте страницы ставится блок:
+
+```markdown
+<!-- pdf-scan:begin page="3" source="vision" sha256="…" kind="text_scan" -->
+
+## Страница 3            ← только если в извлечённом тексте нет своего заголовка
+
+Текст страницы в Markdown: заголовки, абзацы, списки, GFM-таблицы
+
+<!-- vision:begin id="scan-003" sha256="…" kind="text_scan" model="-" -->
+**Описание:** скан страницы отчёта
+**Анализ:** о чём страница
+<!-- vision:end id="scan-003" -->
+
+![Страница 3 (скан)](media/doc/scan-003.png)
+
+<!-- pdf-scan:end page="3" -->
+```
+
+Откуда берётся текст — по порядку, первое сработавшее:
+
+| Запуск | Скан |
+|---|---|
+| `--vision` (рабочий ПК с VLM) | страница → VLM с промптом «перепиши страницу в Markdown», `source="vision"` |
+| `--ocr-fallback` без `--vision` или VLM упал | RapidOCR (кириллица + латиница), `source="ocr"`, без блока `vision:` |
+| ни того, ни другого / оба не смогли | `source="none" status="error" reason="…"` + комментарий с причиной + ссылка на PNG |
+
+Без `--vision` в сеть ничего не уходит, как и для `.docx`. Ответ VLM кэшируется в `.vision-cache/` по sha256
+PNG: повторный запуск не спрашивает API (`--vision-force` — спросить заново). Ошибка одной страницы не роняет
+документ. Без `media_dir` PNG пишется во временную папку: текст есть, ссылки на картинку нет.
+
+**OCR — необязательный** (`--ocr-fallback` или `INGEST_PDF_OCR_FALLBACK=1`), по умолчанию не ставится:
+
+```powershell
+uv sync --extra ocr
+uv run ingest-parse scan.pdf -o out\scan.md --ocr-fallback
+```
+
+Первый запуск качает ~18 МБ моделей PP-OCRv5 с `modelscope.cn` в папку пакета `rapidocr` внутри `.venv`.
+Без extra флаг даёт заглушку `reason="ocr_unavailable"` с подсказкой `uv sync --extra ocr`. Качество OCR ниже,
+чем у VLM: таблицы не собираются (строки текстом), детектор иногда пропускает целые строки, латиница в
+кириллическом тексте путается (`Matlab` → `Матlаь`). Рукопись и сильный перекос страницы не поддерживаются.
 
 Текст абзацев, пунктов, подписей и заголовков сверяется с текстовым слоем `pypdfium2`: оттуда берутся
 `**жирный**` / `*курсив*` (по имени и флагам шрифта), ссылки `[текст](url)` (аннотации-ссылки PDF) и исходные
@@ -256,6 +305,8 @@ uv run ingest-parse report.docx -o out\report.md --vision
 `temperature: 0.2`, `chat_template_kwargs: {"enable_thinking": true, "resolved_reasoning_effort": "high"}`.
 `<think>…</think>` в ответе отбрасывается.
 
+- страницы-сканы PDF (`scan-*`) уходят на VLM ещё при разборе, с промптом «перепиши страницу в Markdown»
+  (см. [Сканы](#сканы-в-pdf)); второй раз как картинка они не описываются;
 - вид картинки (`kind`): `logo` (мелкая), `photo` (JPEG) — только описание; `diagram` (`page-*`, «схема»),
   `table_scan` («Таблица»), `chart` («График»), `equation_img` («Формула», OLE), `unknown` — описание + текст + анализ;
 - ответы кэшируются в `<media>/.vision-cache/<sha256>-<режим>.json`: повторный разбор того же документа API не
@@ -268,7 +319,8 @@ uv run ingest-parse report.docx -o out\report.md --vision
 
 ## Не делает (осознанно)
 
-- сканы на входе: OCR (Tesseract, RapidOCR и т. п.), страницы-картинки целиком, ColPali; PyMuPDF; Marker / MinerU;
+- OCR внутри Docling (`do_ocr`) и OCR digital-страниц; ColPali (поиск по картинкам страниц — отдельная задача);
+  PyMuPDF; Marker / MinerU; рукопись;
 - схемы → текст/Mermaid (только картинка страницы + опционально описание VLM);
 - сноски, колонтитулы;
 - номера списков, набранные полями `SEQ` / `LISTNUM`, и нумерация внутри надписей схем;
@@ -287,4 +339,5 @@ python -m uv run ingest-parse examples\input\report.docx -o examples\output\repo
 
 Docling / docling-slim — MIT; модели Docling — Apache-2.0 / CDLA; torch — BSD-3; OpenCV — Apache-2.0;
 pylatexenc — MIT; pypdfium2 — Apache-2.0 / BSD-3; Pillow — MIT-CMU;
+extra `ocr`: RapidOCR и модели PP-OCR — Apache-2.0, onnxruntime — MIT;
 LibreOffice — внешняя программа (MPL), в пакет не входит. PyMuPDF (AGPL) не используется и не должен добавляться.
