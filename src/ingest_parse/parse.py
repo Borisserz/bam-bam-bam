@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import codecs
 import functools
-import os
 import re
 import tempfile
 from pathlib import Path
@@ -119,23 +118,19 @@ def parse_to_markdown(
     vision: bool = False,
     vision_force: bool = False,
     links_base: str | Path | None = None,
-    ocr_fallback: bool | None = None,
 ) -> str:
     """parse_document + media_link: префикс ссылок на картинки (CLI — относительно out.md).
 
     links_base: папка, от которой считаются ссылки на картинки (для vision; по умолчанию cwd).
-    ocr_fallback: None — из INGEST_PDF_OCR_FALLBACK=1.
     """
-    if ocr_fallback is None:
-        ocr_fallback = os.environ.get("INGEST_PDF_OCR_FALLBACK", "").strip().lower() in ("1", "true", "yes", "on")
     if not (vision or vision_force):
-        return _parse_source(source, filename, media_dir, media_link, ScanOptions(ocr=ocr_fallback))
+        return _parse_source(source, filename, media_dir, media_link, ScanOptions())
 
     from ingest_parse.vision import VisionClient, VisionConfig, enrich_markdown
 
     config = VisionConfig.from_env()  # без адреса API — ошибка до разбора
     client = VisionClient(config)
-    scan = ScanOptions(client, vision_force, config.max_long_edge, ocr_fallback)
+    scan = ScanOptions(client, vision_force, config.max_long_edge)
     md = _parse_source(source, filename, media_dir, media_link, scan)
     return enrich_markdown(
         md,
@@ -179,20 +174,16 @@ def parse_document(
     filename: str | None = None,
     media_dir: str | Path | None = None,
     vision: bool = False,
-    ocr_fallback: bool | None = None,
 ) -> str:
     """txt/doc/docx/docm/rtf/pdf → Markdown. Для bytes нужен filename с расширением.
 
     pdf: текст — из текстового слоя (без OCR). Страница-скан → scan-NNN.png и блок
-    <!-- pdf-scan:begin … --> с текстом от VLM (vision) или OCR (ocr_fallback), иначе заглушка;
+    <!-- pdf-scan:begin … --> с текстом от VLM (vision), без vision — заглушка;
     сканы и пустые страницы → PdfPageWarning.
 
     media_dir: картинки пишутся туда как img-NNN.<ext>, в Markdown — ![подпись](media_dir/img-NNN.<ext>).
     Без media_dir файлы не создаются, от картинок остаётся только текст подписи.
     vision: над каждой картинкой — описание от VLM, страницы-сканы — текст от VLM (нужен
-    VISION_API_BASE_URL; картинки уходят на этот API). Без адреса API — VisionConfigError.
-    ocr_fallback: сканы без vision или при ошибке VLM — RapidOCR (extra ocr); None — из INGEST_PDF_OCR_FALLBACK.
+    VISION_API_BASE_URL;     картинки уходят на этот API). Без адреса API — VisionConfigError.
     """
-    return parse_to_markdown(
-        source, filename=filename, media_dir=media_dir, vision=vision, ocr_fallback=ocr_fallback
-    )
+    return parse_to_markdown(source, filename=filename, media_dir=media_dir, vision=vision)
