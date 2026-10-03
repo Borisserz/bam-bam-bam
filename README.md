@@ -171,7 +171,8 @@ uv run ingest-parse report.pdf -o out\report.md
 uv run ingest-parse report.pdf -o out\report.md --vision
 ```
 
-**Первый запуск** скачивает модели с HuggingFace (~1 ГБ) в `%USERPROFILE%\.cache\huggingface\hub\`, дальше работает
+**Первый запуск** скачивает модели с HuggingFace (~0,5 ГБ: раскладка `docling-layout-heron` и таблицы
+TableFormer из `docling-models`) в `%USERPROFILE%\.cache\huggingface\hub\`, дальше работает
 офлайн. Если `huggingface.co` на ПК закрыт — скопируйте папки `models--docling-project--*` из этого кэша с машины,
 где модели уже скачаны. Разбор: ~5–10 с на документ (CPU), модели грузятся один раз на процесс.
 
