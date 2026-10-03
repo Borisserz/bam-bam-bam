@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import codecs
+import functools
 import re
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from ingest_parse.convert_doc import convert_doc_to_docx, docm_to_docx, docx_to_pdf, find_soffice
 from ingest_parse.detect import detect_format
 from ingest_parse.markdown import docling_to_markdown
 from ingest_parse.media import MediaWriter
+from ingest_parse.pdf_triage import triage_pdf
 from ingest_parse.prepare import prepare_docx
 from ingest_parse.shapes import mark_shapes, render_pages
 
@@ -64,12 +67,37 @@ def _docx_to_markdown(path: Path, media: MediaWriter | None) -> str:
         return docling_to_markdown(converter.convert(str(source)).document, media)
 
 
+@functools.lru_cache(maxsize=1)
+def _pdf_converter() -> Any:
+    """Модели раскладки и таблиц грузятся один раз на процесс; OCR выключен — только текстовый слой."""
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+
+    options = PdfPipelineOptions(do_ocr=False, generate_picture_images=True, images_scale=2.0)
+    return DocumentConverter(
+        allowed_formats=[InputFormat.PDF],
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)},
+    )
+
+
+def _pdf_to_markdown(path: Path, media: MediaWriter | None) -> str:
+    triage = triage_pdf(path)
+    triage.warn()
+    if not triage.usable:
+        return triage.stub()
+    doc = _pdf_converter().convert(str(path)).document
+    return docling_to_markdown(doc, media, skipped=triage.skipped)
+
+
 def _parse_path(path: Path, media: MediaWriter | None) -> str:
     fmt = detect_format(path)
     if fmt == "txt":
         return _txt_to_markdown(path)
     if fmt == "docx":
         return _docx_to_markdown(path, media)
+    if fmt == "pdf":
+        return _pdf_to_markdown(path, media)
     with tempfile.TemporaryDirectory(prefix="ingest-parse-doc-", ignore_cleanup_errors=True) as tmp:
         convert = docm_to_docx if fmt == "docm" else convert_doc_to_docx
         return _docx_to_markdown(convert(path, output_dir=tmp), media)
@@ -108,7 +136,7 @@ def parse_to_markdown(
     if isinstance(source, (bytes, bytearray)):
         if not filename:
             raise ValueError(
-                "filename=... with extension (.txt/.doc/.docx/.docm/.rtf) is required when source is bytes"
+                "filename=... with extension (.txt/.doc/.docx/.docm/.rtf/.pdf) is required when source is bytes"
             )
         with tempfile.TemporaryDirectory(prefix="ingest-parse-bytes-", ignore_cleanup_errors=True) as tmp:
             tmp_path = Path(tmp) / Path(filename).name
@@ -128,7 +156,10 @@ def parse_document(
     media_dir: str | Path | None = None,
     vision: bool = False,
 ) -> str:
-    """txt/doc/docx/docm/rtf → Markdown. Для bytes нужен filename с расширением.
+    """txt/doc/docx/docm/rtf/pdf → Markdown. Для bytes нужен filename с расширением.
+
+    pdf: только born-digital (текстовый слой), без OCR. Страницы-сканы и пустые →
+    комментарий <!-- page N: … skipped --> и PdfPageWarning.
 
     media_dir: картинки пишутся туда как img-NNN.<ext>, в Markdown — ![подпись](media_dir/img-NNN.<ext>).
     Без media_dir файлы не создаются, от картинок остаётся только текст подписи.

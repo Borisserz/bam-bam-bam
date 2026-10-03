@@ -1,20 +1,23 @@
-"""CLI: python -m ingest_parse file [-o out.md] [--media-dir DIR] [--vision | --vision-force]."""
+"""CLI: python -m ingest_parse file (.txt/.doc/.docx/.docm/.rtf/.pdf) [-o out.md] [--media-dir DIR] [--vision | --vision-force]."""
 
 from __future__ import annotations
 
 import argparse
 import os
 import sys
+import warnings
 from pathlib import Path
 
 from ingest_parse.parse import parse_to_markdown
+from ingest_parse.pdf_triage import PdfPageWarning
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        prog="ingest-parse", description="Parse txt/doc/docx/docm/rtf into Markdown."
+        prog="ingest-parse",
+        description="Parse txt/doc/docx/docm/rtf/pdf into Markdown (pdf: born-digital only, no OCR).",
     )
-    p.add_argument("path", type=Path, help="Path to .txt / .doc / .docx / .docm / .rtf")
+    p.add_argument("path", type=Path, help="Path to .txt / .doc / .docx / .docm / .rtf / .pdf")
     p.add_argument("-o", "--output", type=Path, help="Write Markdown to file (default: stdout).")
     p.add_argument(
         "--media-dir",
@@ -50,17 +53,24 @@ def main(argv: list[str] | None = None) -> int:
         media_link = Path(os.path.relpath(media_dir, args.output.parent)).as_posix()
 
     try:
-        md = parse_to_markdown(
-            args.path,
-            media_dir=media_dir,
-            media_link=media_link,
-            vision=args.vision,
-            vision_force=args.vision_force,
-            links_base=args.output.parent if args.output else None,
-        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", PdfPageWarning)
+            md = parse_to_markdown(
+                args.path,
+                media_dir=media_dir,
+                media_link=media_link,
+                vision=args.vision,
+                vision_force=args.vision_force,
+                links_base=args.output.parent if args.output else None,
+            )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    for w in caught:
+        if issubclass(w.category, PdfPageWarning):
+            print(f"warning: {w.message}", file=sys.stderr)
+        else:
+            warnings.showwarning(w.message, w.category, w.filename, w.lineno)
 
     if args.output:
         try:

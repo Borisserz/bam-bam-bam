@@ -57,7 +57,8 @@ def _picture_alt(parts: list[tuple[str, Any]], i: int) -> str:
         return number
 
     prev, nxt = block(i - 1), block(i + 1)
-    if prev and caption_kind(block(i - 2)) == "table" and not caption_kind(prev):
+    titled = prev and not prev.startswith(("|", "!", "- **"))  # между «Таблица N» и картинкой — название, а не сама таблица
+    if titled and caption_kind(block(i - 2)) == "table" and not caption_kind(prev):
         return caption(block(i - 2), prev)
     if caption_kind(prev) == "table":
         return prev
@@ -68,15 +69,48 @@ def _picture_alt(parts: list[tuple[str, Any]], i: int) -> str:
     return "image"
 
 
+_PDF_BULLET = re.compile(r"(?:[•◦▪▫‣⁃●○■□►✓✔\uf0a7\uf0a8\uf0b7\uf076\uf0d8\uf0fc]\s*|[-–—]\s+)")
+_PDF_NUMBER = re.compile(r"(\d+(?:\.\d+)*[.)]|[a-zа-яё][.)])\s+", re.IGNORECASE)
+
+
+def _page_of(item: Any) -> int | None:
+    """Номер страницы PDF; у элементов из docx provenance нет."""
+    prov = getattr(item, "prov", None)
+    return prov[0].page_no if prov else None
+
+
+def _pdf_list_marker(item: Any, text: str, rich: str) -> tuple[str | None, str, str]:
+    """В PDF номер Docling кладёт в marker («2.»), а значок остаётся в тексте: «\uf0b7 Пункт»."""
+    docling_marker = (getattr(item, "marker", "") or "").strip()
+    if _PDF_NUMBER.fullmatch(docling_marker + " "):
+        return docling_marker, text, rich
+    if m := _PDF_BULLET.match(text):
+        return "", text[m.end() :], _PDF_BULLET.sub("", rich, count=1)
+    if m := _PDF_NUMBER.match(text):
+        return m.group(1), text[m.end() :], _PDF_NUMBER.sub("", rich, count=1)
+    return None, text, rich
+
+
 def docling_to_markdown(
-    doc: Any, media: MediaWriter | None = None, shapes: list[Shape] | None = None
+    doc: Any,
+    media: MediaWriter | None = None,
+    shapes: list[Shape] | None = None,
+    skipped: dict[int, str] | None = None,
 ) -> str:
-    """shapes — фигуры из shapes.mark_shapes: их метки в тексте заменяются ссылками на page-NNN.png."""
+    """shapes — фигуры из shapes.mark_shapes: их метки в тексте заменяются ссылками на page-NNN.png.
+
+    skipped — страницы PDF без текстового слоя: их элементы выбрасываются, на их месте — комментарий.
+    """
     parts: list[tuple[str, Any]] = []  # (kind, markdown | индекс фигуры | PictureItem)
     # Уже выведенные поддеревья (склеенные абзацы, таблицы); iterate_items идёт в pre-order — родитель раньше детей
     absorbed: set[str] = set()
     numbers: set[str] = set()  # номера уже найденных заголовков: "1", "4.1"
     pending: list[str] = []  # фигуры абзаца встают сразу после него
+    placeholders = sorted((skipped or {}).items())
+
+    def flush_placeholders(before: float) -> None:
+        while placeholders and placeholders[0][0] < before:
+            parts.append(("block", placeholders.pop(0)[1]))
 
     for item, _level in doc.iterate_items(with_groups=True):
         parts.extend(("shape", index) for index in pending)
@@ -87,6 +121,12 @@ def docling_to_markdown(
             continue
 
         label = label_of(item)
+        page = _page_of(item)
+        if page is not None:
+            flush_placeholders(page)
+        if label in ("page_header", "page_footer") or (skipped and page in skipped):
+            absorbed.add(item.self_ref)
+            continue
         if label == "table":
             absorbed.add(item.self_ref)
             parts.extend(("block", block) for block in table_to_markdown(item, doc))
@@ -108,6 +148,8 @@ def docling_to_markdown(
                 label, list_item = "list_item", parent
         else:
             text = getattr(item, "text", None)
+            if label == "formula" and not (text or "").strip() and page is not None:
+                text = getattr(item, "orig", None)  # PDF: LaTeX нет, остаётся текстовый слой
             rich = link_markdown(text.strip(), item) if isinstance(text, str) else ""
         if shapes is not None and isinstance(text, str) and TOKEN.search(text):
             pending = TOKEN.findall(text)
@@ -116,6 +158,8 @@ def docling_to_markdown(
             continue
         marker, text = marker_of(_drop_docling_number(text))
         _, rich = marker_of(_drop_docling_number(rich))
+        if marker is None and label == "list_item" and _page_of(list_item) is not None:
+            marker, text, rich = _pdf_list_marker(list_item, text.strip(), rich)
         shown = render_scripts(text).strip()  # для заголовков: без **…**, но с <sup>/<sub>
         text, rich = plain(text).strip(), render_scripts(rich).strip()
         if not text:
@@ -130,6 +174,8 @@ def docling_to_markdown(
             heading = 1
         elif label == "section_header":
             heading = min(int(getattr(item, "level", 1) or 1), 6)
+            if _page_of(item) is not None and (number := section_number(text)):
+                heading = min(number.count(".") + 1, 6)  # в PDF у всех заголовков level 1
         elif label in ("text", "list_item"):
             heading = heading_level(
                 text, bold=is_bold(item, doc), in_list=label == "list_item", known=numbers
@@ -162,6 +208,7 @@ def docling_to_markdown(
             parts.append(("block", rich))
 
     parts.extend(("shape", index) for index in pending)
+    flush_placeholders(float("inf"))
     shapes = shapes or []
 
     def shape_of(index: str) -> Shape | None:

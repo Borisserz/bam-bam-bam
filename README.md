@@ -1,14 +1,16 @@
 # ingest-parse
 
-`.txt` / `.doc` / `.docx` / `.docm` / `.rtf` → **Markdown-строка** для RAG (chunking, embeddings, цитирование)
-+ папка `media/` с картинками. DOCX разбирает [Docling](https://github.com/docling-project/docling)
-(`docling-slim`, без torch/OCR); `.doc` и `.rtf` сначала конвертируются LibreOffice в `.docx`.
+`.txt` / `.doc` / `.docx` / `.docm` / `.rtf` / `.pdf` → **Markdown-строка** для RAG (chunking, embeddings,
+цитирование) + папка `media/` с картинками. DOCX и PDF разбирает [Docling](https://github.com/docling-project/docling)
+(`docling-slim`, без OCR); `.doc` и `.rtf` сначала конвертируются LibreOffice в `.docx`. PDF — только
+**born-digital** (с текстовым слоем), Markdown того же вида, что из `.docx`.
 Опционально (`--vision`) над каждой картинкой ставится описание от VLM.
 
 ## Установка (Windows)
 
 Нужно: **Python ≥ 3.12**, [uv](https://docs.astral.sh/uv/), **LibreOffice** (для `.doc`, `.rtf` и картинок-страниц
-со схемами). Остальное (`docling-slim`, `pypdfium2`, `pillow`, `pylatexenc`) ставит `uv sync`.
+со схемами). Остальное (`docling-slim` с моделями раскладки для PDF — torch CPU, `opencv-python-headless`,
+`pypdfium2`, `pillow`, `pylatexenc`) ставит `uv sync`; виртуальное окружение — около 1 ГБ.
 
 PowerShell:
 
@@ -45,6 +47,7 @@ PowerShell:
 uv run ingest-parse report.docx                          # Markdown в stdout (всегда UTF-8)
 uv run ingest-parse report.docx -o out\report.md         # + картинки в out\media\report\
 uv run ingest-parse report.rtf  -o out\report.md
+uv run ingest-parse report.pdf  -o out\report.md          # born-digital PDF
 uv run ingest-parse report.docx -o out\report.md --media-dir D:\m   # картинки в D:\m
 ```
 
@@ -64,9 +67,11 @@ md: str = parse_document("report.docx")
 md = parse_document(data, filename="report.docx")                  # bytes: расширение обязательно
 md = parse_document("report.docx", media_dir="out/media/report")   # + картинки в папку
 md = parse_document("report.docx", media_dir="out/media/report", vision=True)  # + описания VLM
+md = parse_document("report.pdf", media_dir="out/media/report")    # сканы → PdfPageWarning + заглушки
 ```
 
-Ошибки: `UnsupportedFormatError` (подкласс `ValueError`), `FileNotFoundError`, `ValueError` (bytes без `filename`),
+Ошибки: `UnsupportedFormatError` (подкласс `ValueError`), `FileNotFoundError`, `ValueError` (bytes без `filename`,
+запароленный или битый PDF),
 `LibreOfficeNotFoundError`, `RuntimeError` (сбой конвертации LibreOffice), `VisionConfigError` (`vision=True` без
 адреса API). Коды CLI: `0` — успех, `1` — ошибка разбора, `2` — `--vision` без `VISION_API_BASE_URL`.
 
@@ -78,6 +83,7 @@ md = parse_document("report.docx", media_dir="out/media/report", vision=True)  #
 | `.docm` | как `.docx`, макросы игнорируются (LibreOffice не нужен) |
 | `.doc` | LibreOffice → `.docx` → как выше |
 | `.rtf` | LibreOffice → `.docx` → как выше |
+| `.pdf` | born-digital: тот же Markdown, что из `.docx` (см. [PDF](#pdf)); страницы-сканы — комментарий-заглушка |
 | `.txt` | абзацы по пустым строкам, текст как есть |
 
 **Заголовки DOCX**: стиль Word «Заголовок N» / «Название», а также набранные руками:
@@ -154,6 +160,41 @@ Equation 3.0 / MathType — OLE без текста: вместо них ссы�
 `.rtf` всегда идёт через LibreOffice → `.docx` → тот же разбор. Простые RTF (текст, таблицы, картинки) выходят как
 из Word. В сложных RTF рисунки-фигуры и диаграммы LibreOffice может потерять или превратить в обычную картинку.
 
+### PDF
+
+Только **born-digital** PDF — экспорт из Word / LibreOffice / LaTeX, где текст выделяется мышью. Docling
+(модели раскладки и таблиц, OCR выключен) → тот же обход, что для `.docx`: заголовки, списки, GFM-таблицы, подписи,
+картинки `img-NNN.png`, `--vision`.
+
+```powershell
+uv run ingest-parse report.pdf -o out\report.md
+uv run ingest-parse report.pdf -o out\report.md --vision
+```
+
+**Первый запуск** скачивает модели с HuggingFace (~1 ГБ) в `%USERPROFILE%\.cache\huggingface\hub\`, дальше работает
+офлайн. Если `huggingface.co` на ПК закрыт — скопируйте папки `models--docling-project--*` из этого кэша с машины,
+где модели уже скачаны. Разбор: ~5–10 с на документ (CPU), модели грузятся один раз на процесс.
+
+Перед Docling каждая страница проверяется `pypdfium2` (без OCR):
+
+| Страница | Что в Markdown | stderr (CLI) / `PdfPageWarning` |
+|---|---|---|
+| digital — есть текстовый слой | разбирается как обычно | — |
+| hybrid — скан с невидимым OCR-слоем | разбирается по этому слою как есть | `warning: pdf page N classified as hybrid …` |
+| full_scan — картинка без текста или мусорный слой | `<!-- page N: scanned / no usable text layer; skipped -->` | `warning: pdf page N classified as full_scan; placeholder emitted` |
+| blank — пустая | ничего | `warning: pdf page N classified as blank; skipped` |
+
+PDF целиком из сканов / пустых страниц → Markdown из одних заглушек (не пустая строка), код выхода `0`.
+Запароленный PDF → `ValueError` («password-protected»).
+
+Отличия от `.docx` (свойства текстового слоя PDF):
+
+- жирный / курсив внутри абзаца не передаются; длинное тире может прийти дефисом;
+- колонтитулы и номера страниц выбрасываются; уровень нумерованного заголовка — по номеру (`1.2` → `##`);
+- формулы — текстом из PDF внутри `$$…$$` (без LaTeX); соседние короткие абзацы модель раскладки может склеить;
+- блоки кода и титульные листы — как их разметил Docling (код — обычным абзацем);
+- картинки внутри ячеек таблицы не выводятся; векторные схемы без растра — только подпись.
+
 ## Vision: описания картинок (опционально)
 
 По умолчанию парсер работает **офлайн** и никуда ничего не отправляет. С `--vision` после разбора каждая картинка из
@@ -214,7 +255,7 @@ uv run ingest-parse report.docx -o out\report.md --vision
 
 ## Не делает (осознанно)
 
-- PDF / сканы на входе; OCR (Tesseract и т. п.); ColPali; PyMuPDF;
+- сканы на входе: OCR (Tesseract, RapidOCR и т. п.), страницы-картинки целиком, ColPali; PyMuPDF; Marker / MinerU;
 - схемы → текст/Mermaid (только картинка страницы + опционально описание VLM);
 - сноски, колонтитулы;
 - номера списков, набранные полями `SEQ` / `LISTNUM`, и нумерация внутри надписей схем;
@@ -231,5 +272,6 @@ python -m uv run ingest-parse examples\input\report.docx -o examples\output\repo
 
 ## Лицензии
 
-Docling / docling-slim — MIT; pylatexenc — MIT; pypdfium2 — Apache-2.0 / BSD-3; Pillow — MIT-CMU;
+Docling / docling-slim — MIT; модели Docling — Apache-2.0 / CDLA; torch — BSD-3; OpenCV — Apache-2.0;
+pylatexenc — MIT; pypdfium2 — Apache-2.0 / BSD-3; Pillow — MIT-CMU;
 LibreOffice — внешняя программа (MPL), в пакет не входит. PyMuPDF (AGPL) не используется и не должен добавляться.

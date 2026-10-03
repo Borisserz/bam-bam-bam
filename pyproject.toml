@@ -1,14 +1,15 @@
 [project]
 name = "ingest-parse"
 version = "0.1.0"
-description = "txt/doc/docx/docm/rtf → Markdown + media (Docling), optional VLM image descriptions."
+description = "txt/doc/docx/docm/rtf/pdf (born-digital) → Markdown + media (Docling), optional VLM image descriptions."
 readme = "README.md"
 authors = [
     { name = "Boris Serzh", email = "borisserzh5@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "docling-slim[format-docx,convert-core]==2.131.0",
+    "docling-slim[convert-core,format-docx,format-pdf,models-local]==2.131.0",
+    "opencv-python-headless>=4.6,<5",
     "pillow>=10",
     "pylatexenc>=2.10,<3.0",
     "pypdfium2>=4.30",
