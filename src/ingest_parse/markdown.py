@@ -16,11 +16,21 @@ from ingest_parse.docling_text import (
 )
 from ingest_parse.headings import caption_kind, heading_level, section_number, split_glued_heading
 from ingest_parse.media import MediaWriter, image_markdown
+from ingest_parse.numbering import NUM, finalize, list_bullet, marker_of, plain, render_scripts
 from ingest_parse.shapes import TOKEN, Shape
 from ingest_parse.tables import table_to_markdown
 
 _BARE_CAPTION = re.compile(r"(таблица|табл\.?|рисунок|рис\.?)\s*(?:[а-яa-z]\.)?\d+(?:\.\d+)*\.?", re.IGNORECASE)
 _SCHEME_CAPTION = re.compile(r"схема\s+\S.{0,78}[^.]", re.IGNORECASE)  # «Схема БД», «Схема алгоритма»
+
+
+_DOCLING_NUMBER = re.compile(r"\s*\d+(?:\.\d+)*\s*")
+
+
+def _drop_docling_number(text: str) -> str:
+    """Нумерованный заголовок: Docling ставит свой счётчик «1.2 » перед меткой номера Word."""
+    m = NUM.search(text)
+    return text[m.start() :] if m and _DOCLING_NUMBER.fullmatch(text[: m.start()]) else text
 
 
 def _caption_kind(text: str) -> str | None:
@@ -102,9 +112,16 @@ def docling_to_markdown(
         if shapes is not None and isinstance(text, str) and TOKEN.search(text):
             pending = TOKEN.findall(text)
             text, rich = TOKEN.sub("", text), TOKEN.sub("", rich).strip()
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str):
             continue
-        text = text.strip()
+        marker, text = marker_of(_drop_docling_number(text))
+        _, rich = marker_of(_drop_docling_number(rich))
+        shown = render_scripts(text).strip()  # для заголовков: без **…**, но с <sup>/<sub>
+        text, rich = plain(text).strip(), render_scripts(rich).strip()
+        if not text:
+            continue
+        if marker and label not in ("list_item", "title", "section_header"):
+            text, rich, shown = f"{marker} {text}", f"{marker} {rich}", f"{marker} {shown}"
 
         heading: int | None = None
         if label in ("title", "section_header") and caption_kind(text):
@@ -126,13 +143,18 @@ def docling_to_markdown(
                     continue
 
         if heading is not None:
+            if marker and label in ("list_item", "title", "section_header"):
+                text, shown = f"{marker} {text}", f"{marker} {shown}"
             if number := section_number(text):
                 numbers.add(number)
-            parts.append(("block", f"{'#' * heading} {text}"))
+            parts.append(("block", f"{'#' * heading} {shown}"))
         elif label == "list_item":
             # 3 пробела: минимум для вложенности под "1." в CommonMark
             indent = "   " * (list_depth(list_item, doc) - 1)
-            bullet = "1." if getattr(list_item, "enumerated", False) else "-"
+            if marker is not None:
+                bullet = list_bullet(marker)
+            else:
+                bullet = "1." if getattr(list_item, "enumerated", False) else "-"
             parts.append(("list", f"{indent}{bullet} {rich}"))
         elif label == "formula":
             parts.append(("block", f"$$\n{unlatex_text(text)}\n$$"))
@@ -180,5 +202,5 @@ def docling_to_markdown(
         lead = " " if m.group(0)[0].isspace() else ""
         return lead + _shape_markdown(shape, None) if shape else ""
 
-    out = TOKEN.sub(inline_shape, out)
+    out = finalize(TOKEN.sub(inline_shape, out))
     return out + "\n" if out else ""

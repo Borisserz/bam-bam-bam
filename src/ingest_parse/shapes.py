@@ -101,32 +101,44 @@ def _marker_run(index: int) -> etree._Element:
     return run
 
 
+def mark_shape_runs(root: etree._Element, rels_xml: bytes | None) -> list[Shape]:
+    """Метка перед каждой фигурой в document.xml (на месте); список фигур по порядку меток."""
+    targets = _blip_targets(rels_xml)
+    shapes: list[Shape] = []
+    done: set[etree._Element] = set()
+    for el in root.xpath("//mc:AlternateContent | //w:drawing | //w:pict | //w:object", namespaces=_NS):
+        if any(anc in done for anc in el.iterancestors()):
+            continue
+        done.add(el)
+        kind = _kind(el, targets)
+        run = next((anc for anc in el.iterancestors(_q("w:r"))), None)
+        if kind is None or run is None:
+            continue
+        run.addprevious(_marker_run(len(shapes)))
+        shapes.append(Shape(kind))
+    return shapes
+
+
+def read_part(zin: zipfile.ZipFile, name: str) -> bytes | None:
+    return zin.read(name) if name in zin.namelist() else None
+
+
+def write_with_document(zin: zipfile.ZipFile, dst: Path, root: etree._Element) -> None:
+    with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            data = zin.read(info)
+            if info.filename == "word/document.xml":
+                data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+            zout.writestr(info, data)
+
+
 def mark_shapes(src: Path, dst: Path) -> list[Shape]:
-    """Копия src → dst с меткой перед каждой фигурой; список фигур по порядку меток."""
+    """Копия src → dst с меткой перед каждой фигурой (для рендера PDF); пишет dst, только если фигуры есть."""
     with zipfile.ZipFile(src) as zin:
         root = etree.fromstring(zin.read("word/document.xml"))
-        rels = zin.read("word/_rels/document.xml.rels") if "word/_rels/document.xml.rels" in zin.namelist() else None
-        targets = _blip_targets(rels)
-        shapes: list[Shape] = []
-        done: set[etree._Element] = set()
-        for el in root.xpath("//mc:AlternateContent | //w:drawing | //w:pict | //w:object", namespaces=_NS):
-            if any(anc in done for anc in el.iterancestors()):
-                continue
-            done.add(el)
-            kind = _kind(el, targets)
-            run = next((anc for anc in el.iterancestors(_q("w:r"))), None)
-            if kind is None or run is None:
-                continue
-            run.addprevious(_marker_run(len(shapes)))
-            shapes.append(Shape(kind))
-        if not shapes:
-            return []
-        with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
-            for info in zin.infolist():
-                data = zin.read(info)
-                if info.filename == "word/document.xml":
-                    data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
-                zout.writestr(info, data)
+        shapes = mark_shape_runs(root, read_part(zin, "word/_rels/document.xml.rels"))
+        if shapes:
+            write_with_document(zin, dst, root)
     return shapes
 
 

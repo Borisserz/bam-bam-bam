@@ -10,6 +10,7 @@ from pylatexenc.latexencode import unicode_to_latex
 # Docling срезает пробелы на краях run'ов
 _NO_SPACE_BEFORE = tuple(",.;:!?)]}»…%")
 _NO_SPACE_AFTER = tuple("([{«„")
+_SCRIPT_START = ("zqxsupzqx", "zqxsubzqx")  # метки индексов из numbering.mark_scripts
 
 # Docling кодирует буквы в формулах text-макросами pylatexenc: "Сумма" → \CYRS \cyru \cyrm \cyrm \cyra
 _TEXT_MACROS: dict[str, str] = {"\\~": " "}  # \~ — неразрывный пробел
@@ -50,7 +51,8 @@ def parent_of(item: Any, doc: Any) -> Any | None:
 def join_runs(parts: list[str]) -> str:
     out = ""
     for part in parts:
-        if out and not part.startswith(_NO_SPACE_BEFORE) and not out.endswith(_NO_SPACE_AFTER):
+        index = part.lstrip("*").startswith(_SCRIPT_START)  # x₁: индекс прилипает к предыдущему run'у
+        if out and not index and not part.startswith(_NO_SPACE_BEFORE) and not out.endswith(_NO_SPACE_AFTER):
             out += " "
         out += part
     return out

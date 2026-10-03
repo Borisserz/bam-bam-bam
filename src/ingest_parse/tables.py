@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from ingest_parse.docling_text import collect_inline, is_bold, label_of, unlatex_text
+from ingest_parse.numbering import list_bullet, marker_of, render_scripts
+
+_LISTED = re.compile(r"(?:- |\d+[.)] )")  # номер Word уже стоит в начале строки
 
 MAX_HEADER_ROWS = 3
 MAX_SHORT_CELL = 40
@@ -40,7 +43,11 @@ class _Cell:
 
 def _clean(line: str) -> str:
     line = _FORMULA.sub(lambda m: unlatex_text(m.group(0)), line)
-    return re.sub(r"[ \t\u00a0]+", " ", line).strip()
+    marker, line = marker_of(line)
+    line = re.sub(r"[ \t\u00a0]+", " ", render_scripts(line)).strip()
+    if marker is not None and line:
+        line = f"{list_bullet(marker)} {line.removeprefix('- ')}"
+    return line
 
 
 def _walk_lines(node: Any, doc: Any, out: list[str]) -> None:
@@ -113,7 +120,7 @@ def _cell_lines(cell: Any, doc: Any) -> tuple[list[str], bool]:
         _nested_rows(group, doc, lines)  # вложенных таблиц в cell.text нет
     items: set[str] = set()
     _list_texts(group, doc, items)
-    lines = [f"- {ln}" if ln in items else ln for ln in lines]
+    lines = [f"- {ln}" if ln in items and not _LISTED.match(ln) else ln for ln in lines]
     return lines, is_bold(group, doc)
 
 

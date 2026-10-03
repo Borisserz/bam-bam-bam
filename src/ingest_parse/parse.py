@@ -11,6 +11,7 @@ from ingest_parse.convert_doc import convert_doc_to_docx, docm_to_docx, docx_to_
 from ingest_parse.detect import detect_format
 from ingest_parse.markdown import docling_to_markdown
 from ingest_parse.media import MediaWriter
+from ingest_parse.prepare import prepare_docx
 from ingest_parse.shapes import mark_shapes, render_pages
 
 _BLANK_LINE = re.compile(r"\n[ \t]*\n")
@@ -46,15 +47,21 @@ def _docx_to_markdown(path: Path, media: MediaWriter | None) -> str:
     from docling.document_converter import DocumentConverter
 
     converter = DocumentConverter(allowed_formats=[InputFormat.DOCX])
-    if media is not None and find_soffice() is not None:
-        with tempfile.TemporaryDirectory(prefix="ingest-parse-shapes-", ignore_cleanup_errors=True) as tmp:
-            marked = Path(tmp) / f"{path.stem}.docx"
-            shapes = mark_shapes(path, marked)
-            if shapes:
-                pdf = docx_to_pdf(marked, output_dir=Path(tmp) / "pdf")
-                shapes = render_pages(pdf, shapes, media)
-                return docling_to_markdown(converter.convert(str(marked)).document, media, shapes)
-    return docling_to_markdown(converter.convert(str(path)).document, media)
+    render = media is not None and find_soffice() is not None
+    with tempfile.TemporaryDirectory(prefix="ingest-parse-docx-", ignore_cleanup_errors=True) as tmp:
+        prepared = Path(tmp) / "prepared" / f"{path.stem}.docx"
+        prepared.parent.mkdir()
+        changed, shapes = prepare_docx(path, prepared, shapes=render)
+        source = prepared if changed else path
+        if shapes:
+            # в PDF — копия только с невидимыми метками фигур, без меток номеров и индексов
+            for_pdf = Path(tmp) / "pdf-src" / f"{path.stem}.docx"
+            for_pdf.parent.mkdir()
+            mark_shapes(path, for_pdf)
+            pdf = docx_to_pdf(for_pdf, output_dir=Path(tmp) / "pdf")
+            shapes = render_pages(pdf, shapes, media)
+            return docling_to_markdown(converter.convert(str(source)).document, media, shapes)
+        return docling_to_markdown(converter.convert(str(source)).document, media)
 
 
 def _parse_path(path: Path, media: MediaWriter | None) -> str:
