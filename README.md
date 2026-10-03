@@ -223,8 +223,11 @@ uv run ingest-parse report.docx -o out\report.md --vision
 
 ## Примеры
 
-`examples/input/` — исходники, `examples/output/<файл>.md` — результат `ingest-parse <файл> -o <файл>.md`
-(картинки `examples/output/media/` не коммитятся — появляются после локального запуска). См. `examples/README.md`.
+`examples/input/` и `examples/output/` в репозитории пустые: положите свои документы в `input/` и запустите
+
+```powershell
+python -m uv run ingest-parse examples\input\report.docx -o examples\output\report.md
+```
 
 ## Лицензии
 
