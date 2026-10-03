@@ -26,6 +26,7 @@ _WARNING = {
     "blank": "pdf page {n} classified as blank; skipped",
     "hybrid": "pdf page {n} classified as hybrid (scan with OCR text layer); text layer used as is",
 }
+_VECTOR_ONLY = "pdf page {n} has only vector graphics, no text; kept only if Docling detects a picture there"
 
 
 class PdfPageWarning(UserWarning):
@@ -38,6 +39,7 @@ class PageInfo:
     kind: PageKind
     chars: int
     image_coverage: float
+    vector_only: bool = False  # ни текста, ни растра — только линии и фигуры
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,8 @@ class TriageResult:
         for p in self.pages:
             if p.kind in _WARNING:
                 warnings.warn(_WARNING[p.kind].format(n=p.number), PdfPageWarning, stacklevel=2)
+            elif p.vector_only:
+                warnings.warn(_VECTOR_ONLY.format(n=p.number), PdfPageWarning, stacklevel=2)
 
 
 def _classify(page: pdfium.PdfPage) -> tuple[PageKind, int, float]:
@@ -119,7 +123,8 @@ def triage_pdf(path: str | Path) -> TriageResult:
                 kind, chars, coverage = _classify(page)
             finally:
                 page.close()
-            pages.append(PageInfo(index + 1, kind, chars, round(coverage, 3)))
+            vector_only = kind == "digital" and chars == 0 and coverage == 0
+            pages.append(PageInfo(index + 1, kind, chars, round(coverage, 3), vector_only))
         return TriageResult(pages)
     finally:
         pdf.close()

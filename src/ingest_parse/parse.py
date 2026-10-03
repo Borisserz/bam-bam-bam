@@ -13,6 +13,7 @@ from ingest_parse.convert_doc import convert_doc_to_docx, docm_to_docx, docx_to_
 from ingest_parse.detect import detect_format
 from ingest_parse.markdown import docling_to_markdown
 from ingest_parse.media import MediaWriter
+from ingest_parse.pdf_text import apply_text_layer
 from ingest_parse.pdf_triage import triage_pdf
 from ingest_parse.prepare import prepare_docx
 from ingest_parse.shapes import mark_shapes, render_pages
@@ -87,7 +88,8 @@ def _pdf_to_markdown(path: Path, media: MediaWriter | None) -> str:
     if not triage.usable:
         return triage.stub()
     doc = _pdf_converter().convert(str(path)).document
-    return docling_to_markdown(doc, media, skipped=triage.skipped)
+    overrides = apply_text_layer(doc, path)
+    return docling_to_markdown(doc, media, skipped=triage.skipped, overrides=overrides)
 
 
 def _parse_path(path: Path, media: MediaWriter | None) -> str:
