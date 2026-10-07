@@ -279,20 +279,32 @@ def _runs(mask: np.ndarray) -> int:
 # --- Heron ---
 
 
+_ENGINE_ERROR: Exception | None = None  # без сети загрузка ждёт таймауты — на каждой странице не повторяем
+
+
 @functools.lru_cache(maxsize=1)
 def _engine() -> tuple[Any, dict[int, str]]:
+    global _ENGINE_ERROR
+    if _ENGINE_ERROR is not None:
+        raise _ENGINE_ERROR
     from docling.datamodel.accelerator_options import AcceleratorOptions
     from docling.datamodel.pipeline_options import LayoutObjectDetectionOptions
-    from docling.models.inference_engines.object_detection import (
-        create_object_detection_engine,
-    )
+    from docling.datamodel.settings import settings
+    from docling.models.inference_engines import object_detection
 
     options = LayoutObjectDetectionOptions.from_preset("layout_heron_default")
     options.engine_options.score_threshold = min(HERON_MIN.values())
-    engine = create_object_detection_engine(
-        options=options.engine_options, model_spec=options.model_spec, accelerator_options=AcceleratorOptions()
-    )
-    engine.initialize()
+    try:
+        engine = object_detection.create_object_detection_engine(
+            options=options.engine_options,
+            model_spec=options.model_spec,
+            accelerator_options=AcceleratorOptions(),
+            artifacts_path=settings.artifacts_path,  # DOCLING_ARTIFACTS_PATH: модели, скачанные docling-tools
+        )
+        engine.initialize()
+    except Exception as exc:
+        _ENGINE_ERROR = exc
+        raise
     return engine, engine.get_label_mapping()
 
 

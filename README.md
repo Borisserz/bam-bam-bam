@@ -290,6 +290,7 @@ uv run ingest-parse report.docx -o out\report.md --vision
 | `INGEST_VISION_MAX_RETRIES` | `2` | повторы при сетевой ошибке / 5xx / 429 |
 | `INGEST_VISION_MAX_LONG_EDGE` | `2048` | картинка больше — уменьшается в памяти перед отправкой (файл не меняется) |
 | `INGEST_VISION_REASONING` | `low` | размышление модели: `off` / `low` / `medium` / `high`; меньше — быстрее ответ |
+| `DOCLING_ARTIFACTS_PATH` | — | папка моделей Heron из `docling-tools models download` — для ПК без интернета |
 
 Тело запроса: `messages` (пустой `system` + `user` с текстом и `image_url` = `data:image/png;base64,…`),
 `temperature: 0.2`, `chat_template_kwargs: {"enable_thinking": true, "resolved_reasoning_effort": "low"}`
