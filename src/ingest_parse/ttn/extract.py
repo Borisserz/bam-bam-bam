@@ -146,12 +146,11 @@ class _Asker:
 
 
 def _orient(asker: _Asker, name: str):
-    """VLM смотрит на уменьшенную страницу и говорит угол (Heron для этого ненадёжен: разница уверенности ~0.05)."""
+    """VLM сравнивает страницу и её поворот на 180° (Heron для этого ненадёжен: разница уверенности ~0.05)."""
+    from ingest_parse.ttn.preprocess import upright_pair
 
     def check(image: Image.Image) -> int:
-        thumb = image.copy()
-        thumb.thumbnail((1024, 1024))
-        return prompts.parse_rotation(asker.ask(thumb, prompts.ORIENTATION, name))
+        return prompts.parse_upright(asker.ask(upright_pair(image), prompts.UPRIGHT, name))
 
     return check
 

@@ -120,9 +120,33 @@ def prepare(
     gray = levels(gray)
     out.steps.append("levels")
     turn = orient(Image.fromarray(gray)) % 360 if orient is not None else 0
-    if turn in _CV_ROTATE:
-        gray = cv2.rotate(gray, _CV_ROTATE[turn])
-        out.rotation = (out.rotation + 360 - turn) % 360
-        out.steps.append(f"rotate {turn}° clockwise (vision)")
+    if turn == 180:
+        gray = cv2.rotate(gray, _CV_ROTATE[180])
+        out.rotation = (out.rotation + 180) % 360
+        out.steps.append("rotate 180° clockwise (vision)")
+    elif turn:
+        # строки уже горизонтальны (геометрия выше); 90/270 от VLM — частая ошибка, лист на бок не кладём
+        out.steps.append(f"vision said {turn}°, ignored")
     out.image = Image.fromarray(gray)
+    return out
+
+
+def upright_pair(image: Image.Image, size: int = 1024) -> Image.Image:
+    """Две копии страницы для VLM: слева A — как есть, справа B — повёрнутая на 180°; подписи сверху."""
+    from PIL import ImageDraw, ImageFont
+
+    page = image.convert("L")
+    page.thumbnail((size, size))
+    head, gap = 64, 24
+    out = Image.new("L", (page.width * 2 + gap, page.height + head), 255)
+    out.paste(page, (0, head))
+    out.paste(page.rotate(180), (page.width + gap, head))
+    ImageDraw.Draw(out).rectangle((page.width, 0, page.width + gap, out.height), fill=128)
+    draw = ImageDraw.Draw(out)
+    try:
+        font = ImageFont.load_default(size=48)
+    except (TypeError, OSError):
+        font = ImageFont.load_default()
+    draw.text((page.width // 2 - 16, 6), "A", fill=0, font=font)
+    draw.text((page.width + gap + page.width // 2 - 16, 6), "B", fill=0, font=font)
     return out

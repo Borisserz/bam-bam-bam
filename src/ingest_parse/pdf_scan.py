@@ -122,17 +122,16 @@ def _vision(
 
 
 def _orienter(options: ScanOptions, number: int, work: Path, cache_dir: Path):
-    """VLM по уменьшенной странице говорит, на сколько градусов по часовой повернуть; сбой — не крутим."""
-    from ingest_parse.ttn.prompts import ORIENTATION, parse_json, parse_rotation
+    """VLM сравнивает страницу и её поворот на 180° (A/B) и говорит, где текст не вверх ногами; сбой — не крутим."""
+    from ingest_parse.ttn.preprocess import upright_pair
+    from ingest_parse.ttn.prompts import UPRIGHT, parse_json, parse_upright
     from ingest_parse.vision import VisionError
 
     def ask(image: Any) -> int:
-        thumb = image.copy()
-        thumb.thumbnail((1024, 1024))
-        path = work / f"scan-{number:03d}-orient.png"
-        thumb.save(path)
+        path = work / f"scan-{number:03d}-upright.png"
+        upright_pair(image).save(path)
         try:
-            return parse_rotation(parse_json(_complete(path, ORIENTATION, "orientation", options, cache_dir)))
+            return parse_upright(parse_json(_complete(path, UPRIGHT, "upright", options, cache_dir)))
         except VisionError:
             return 0
 
