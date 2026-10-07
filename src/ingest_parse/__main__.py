@@ -32,6 +32,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--vision-force", action="store_true", help="Like --vision, but re-ask the API for every picture."
     )
+    p.add_argument(
+        "--scan-layout",
+        action="store_true",
+        help="PDF scans: run Heron layout (boxes in <media>/debug/); with --vision, figures and tables go to VLM as crops.",
+    )
     args = p.parse_args(argv)
 
     vision = args.vision or args.vision_force
@@ -62,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
                 vision=args.vision,
                 vision_force=args.vision_force,
                 links_base=args.output.parent if args.output else None,
+                scan_layout=args.scan_layout,
             )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

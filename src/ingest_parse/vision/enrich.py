@@ -94,7 +94,7 @@ def enrich_markdown(
             if "://" in link or not path.is_file() or path.stem in done:
                 continue
             done.add(path.stem)
-            block = _describe(path, m.group("alt"), client, force, max_long_edge)
+            block = describe_image(path, m.group("alt"), client, force, max_long_edge)
             inserts.setdefault(_anchor(lines, i), []).append(block)
 
     out: list[str] = []
@@ -105,7 +105,8 @@ def enrich_markdown(
     return "\n".join(out)
 
 
-def _describe(path: Path, alt: str, client: Completer, force: bool, max_long_edge: int) -> str:
+def describe_image(path: Path, alt: str, client: Completer, force: bool, max_long_edge: int) -> str:
+    """Блок <!-- vision:begin … --> для одного файла (кэш в <папка файла>/.vision-cache)."""
     raw = path.read_bytes()
     sha = hashlib.sha256(raw).hexdigest()
     kind = image_kind(path, _caption(alt) or "image")

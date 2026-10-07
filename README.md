@@ -377,10 +377,24 @@ uv run ingest-parse scan.pdf -o out\scan.md               # без модели:
 uv run ingest-parse scan.pdf -o out\scan_vision.md --vision   # через модель: текст страниц
 uv run python scripts\heron_raw.py scan.pdf out\heron     # что нашёл Heron: регионы в консоли,
                                                           # out\heron\page-NNN-heron.png с рамками, docling.md
+
+# Heron + модель (--scan-layout): Heron размечает скан, рисунки и таблицы уходят в модель вырезами
+uv run ingest-parse scan.pdf -o out\scan_layout.md --scan-layout            # только Heron, без модели
+uv run ingest-parse scan.pdf -o out\scan_layout.md --scan-layout --vision   # Heron + модель
 ```
 
-На скане без текстового слоя Docling оставляет только регионы-картинки (`<!-- image -->`), текст теряется —
-поэтому наш пайплайн отправляет такие страницы в VLM.
+Что смотреть после `--scan-layout` (папка `out\media\scan\debug\`):
+
+- `scan-NNN-heron.png` — страница с рамками: синие — рисунки, зелёные — таблицы, красные — текст, серые — колонтитулы;
+- `scan-NNN-heron.json` — список областей: метка, уверенность, рамка, что с ней сделали (`use`);
+- `scan-NNN-masked.png` — что увидела модель: рисунки и таблицы закрашены, вместо них `[FIGURE K]` / `[TABLE K]`.
+
+В `out\media\scan\` лежат вырезы `scan-NNN-fig-K.png` и `scan-NNN-table-K.png` (рендер ×4).
+В Markdown таблица со скана встаёт на место `[TABLE K]`, рисунок — на место `[FIGURE K]`
+(описание модели + картинка); блок страницы помечен `layout="heron"`.
+
+Обычный Docling на скане оставляет только регионы-картинки (`<!-- image -->`): он выбрасывает области
+без текстового слоя. С `--scan-layout` мы включаем `keep_empty_clusters`, и Heron отдаёт всю раскладку.
 
 **7. Тесты** (нужны `tests/` и `examples/` из zip; в GitHub их нет)
 

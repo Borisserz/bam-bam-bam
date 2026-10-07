@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -27,7 +28,7 @@ def image_kind(path: Path, alt: str) -> str:
         return "equation_img"
     if head.startswith("график"):
         return "chart"
-    if path.stem.startswith("page-"):
+    if path.stem.startswith("page-") or re.match(r"scan-\d+-fig-", path.stem):
         return "diagram"
     if path.stem.startswith("scan-"):
         return "text_scan"

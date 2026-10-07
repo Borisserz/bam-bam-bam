@@ -118,19 +118,20 @@ def parse_to_markdown(
     vision: bool = False,
     vision_force: bool = False,
     links_base: str | Path | None = None,
+    scan_layout: bool = False,
 ) -> str:
     """parse_document + media_link: префикс ссылок на картинки (CLI — относительно out.md).
 
     links_base: папка, от которой считаются ссылки на картинки (для vision; по умолчанию cwd).
     """
     if not (vision or vision_force):
-        return _parse_source(source, filename, media_dir, media_link, ScanOptions())
+        return _parse_source(source, filename, media_dir, media_link, ScanOptions(layout=scan_layout))
 
     from ingest_parse.vision import VisionClient, VisionConfig, enrich_markdown
 
     config = VisionConfig.from_env()  # без адреса API — ошибка до разбора
     client = VisionClient(config)
-    scan = ScanOptions(client, vision_force, config.max_long_edge)
+    scan = ScanOptions(client, vision_force, config.max_long_edge, scan_layout)
     md = _parse_source(source, filename, media_dir, media_link, scan)
     return enrich_markdown(
         md,
@@ -174,6 +175,7 @@ def parse_document(
     filename: str | None = None,
     media_dir: str | Path | None = None,
     vision: bool = False,
+    scan_layout: bool = False,
 ) -> str:
     """txt/doc/docx/docm/rtf/pdf → Markdown. Для bytes нужен filename с расширением.
 
@@ -185,5 +187,7 @@ def parse_document(
     Без media_dir файлы не создаются, от картинок остаётся только текст подписи.
     vision: над каждой картинкой — описание от VLM, страницы-сканы — текст от VLM (нужен
     VISION_API_BASE_URL;     картинки уходят на этот API). Без адреса API — VisionConfigError.
+    scan_layout: на страницах-сканах — раскладка Heron (media_dir/debug/: рамки и JSON); с vision
+    рисунки и таблицы скана вырезаются и уходят в VLM отдельно.
     """
-    return parse_to_markdown(source, filename=filename, media_dir=media_dir, vision=vision)
+    return parse_to_markdown(source, filename=filename, media_dir=media_dir, vision=vision, scan_layout=scan_layout)

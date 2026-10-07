@@ -51,10 +51,14 @@ class MediaWriter:
 
     def save_scan(self, image: Any, number: int) -> tuple[Path, str]:
         """PNG страницы-скана PDF: scan-NNN.png (не page-NNN — те для схем Word); путь к файлу и ссылка."""
-        name = f"scan-{number:03d}.png"
-        self.directory.mkdir(parents=True, exist_ok=True)
-        image.save(self.directory / name)
-        return self.directory / name, self._link(name)
+        return self.save_named(image, f"scan-{number:03d}.png")
+
+    def save_named(self, image: Any, name: str) -> tuple[Path, str]:
+        """PIL-картинка под заданным именем (можно с подпапкой: debug/…); путь к файлу и ссылка."""
+        path = self.directory / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(path)
+        return path, self._link(name)
 
     def _link(self, name: str) -> str:
         return f"{self.link_base}/{name}" if self.link_base else name
