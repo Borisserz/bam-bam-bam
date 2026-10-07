@@ -24,6 +24,9 @@ class VisionCache:
         return answer if isinstance(answer, str) and answer else None
 
     def put(self, sha256: str, mode: str, model: str | None, answer: str) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
         payload = {"sha256": sha256, "mode": mode, "model": model, "answer": answer}
-        self._path(sha256, mode, model).write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+        try:  # Windows: путь длиннее 260 символов — без кэша, ответ всё равно используется
+            self.directory.mkdir(parents=True, exist_ok=True)
+            self._path(sha256, mode, model).write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError:
+            pass

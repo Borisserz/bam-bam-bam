@@ -18,7 +18,7 @@ _KIND_RU = {
 }
 
 SECTIONS = ("Описание", "Текст с изображения", "Анализ")
-_LABEL = re.compile(r"^\s*\**\s*(Описание|Текст с изображения|Анализ)\s*:?\s*\**\s*:?\s*", re.M)
+_LABEL = re.compile(r"^\s*\**\s*(Описание|Текст с изображения|Анализ)\s*(?::\s*\**|\**\s*:)\s*", re.M)
 
 
 def build_prompt(mode: PromptMode, kind: str, caption: str | None) -> str:

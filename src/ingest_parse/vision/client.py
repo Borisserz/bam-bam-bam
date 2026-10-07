@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -36,7 +37,7 @@ class VisionConfig:
     base_url: str
     api_key: str | None = None
     model: str | None = None
-    timeout_s: float = 60.0
+    timeout_s: float = 300.0
     max_retries: int = 2
     max_long_edge: int = 2048
     temperature: float = 0.2
@@ -59,10 +60,18 @@ class VisionConfig:
             base_url=base,
             api_key=_env("INGEST_VISION_API_KEY", "VISION_API_KEY"),
             model=_env("INGEST_VISION_MODEL", "VISION_MODEL"),
-            timeout_s=float(_env("INGEST_VISION_TIMEOUT_S") or 60),
-            max_retries=int(_env("INGEST_VISION_MAX_RETRIES") or 2),
-            max_long_edge=int(_env("INGEST_VISION_MAX_LONG_EDGE") or 2048),
+            timeout_s=_number("INGEST_VISION_TIMEOUT_S", 300, float),
+            max_retries=_number("INGEST_VISION_MAX_RETRIES", 2, int),
+            max_long_edge=_number("INGEST_VISION_MAX_LONG_EDGE", 2048, int),
         )
+
+
+def _number(name: str, default: Any, kind: Callable[[str], Any]) -> Any:
+    raw = _env(name)
+    try:
+        return default if raw is None else kind(raw)
+    except ValueError as exc:
+        raise VisionConfigError(f"{name}={raw!r} is not a number") from exc
 
 
 def build_body(prompt: str, image_url: str, model: str | None = None, temperature: float = 0.2) -> dict[str, Any]:
@@ -92,10 +101,21 @@ def _content(data: Any) -> str:
         raise VisionError(f"unexpected response: {str(data)[:200]}") from exc
     if isinstance(content, list):
         content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
-    text = _THINK.sub("", content or "").strip()
+    text = _THINK.sub("", content or "")
+    if "</think>" in text:  # шаблон модели сам открыл <think>: рассуждение без открывающего тега
+        text = text.rsplit("</think>", 1)[1]
+    text = text.strip()
     if not text:
         raise VisionError("empty response")
     return text
+
+
+def _body(exc: urllib.error.HTTPError) -> str:
+    """Причина от сервера (например, превышен контекст) — в сообщение об ошибке."""
+    try:
+        return " ".join(exc.read()[:300].decode("utf-8", "replace").split())
+    except (OSError, http.client.HTTPException):
+        return ""
 
 
 class VisionClient:
@@ -118,11 +138,15 @@ class VisionClient:
                 with urllib.request.urlopen(request, timeout=self.config.timeout_s) as response:
                     return _content(json.loads(response.read().decode("utf-8")))
             except urllib.error.HTTPError as exc:
-                error = VisionError(f"HTTP {exc.code} from {self.config.endpoint}")
+                error = VisionError(f"HTTP {exc.code} from {self.config.endpoint}: {_body(exc)}")
                 if exc.code < 500 and exc.code != 429:
                     raise error from exc
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            except TimeoutError as exc:  # сервер дальше считает брошенный запрос — повтор только удлинит очередь
+                raise VisionError(f"timed out after {self.config.timeout_s:.0f} s (INGEST_VISION_TIMEOUT_S)") from exc
+            except (urllib.error.URLError, ConnectionError, http.client.HTTPException) as exc:
+                if isinstance(getattr(exc, "reason", None), TimeoutError):
+                    raise VisionError(f"timed out after {self.config.timeout_s:.0f} s (INGEST_VISION_TIMEOUT_S)") from exc
                 error = VisionError(f"{type(exc).__name__}: {exc}")
-            except json.JSONDecodeError as exc:
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise VisionError(f"invalid JSON from {self.config.endpoint}") from exc
         raise error or VisionError("request failed")

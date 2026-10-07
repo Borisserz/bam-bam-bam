@@ -196,6 +196,12 @@ def _merge_header(target: Waybill, data: dict[str, Any]) -> None:
             setattr(target, name, getattr(parsed, name))
 
 
+def _page_kind(header: dict | None, default: str) -> str:
+    words = str((header or {}).get("page_kind") or "").split()
+    kind = words[0].strip(" —-|") if words else default
+    return kind if kind in ("front", "continuation", "back", "other") else default
+
+
 def _read_fields(
     asker: _Asker, image: Image.Image, regions: list[tuple[str, float, Box]], zones: Zones, page: int,
     waybill: Waybill, report: PageReport, work: Path, rel: Any,
@@ -269,8 +275,7 @@ def extract_ttn(path: Path, out_dir: Path, options: TtnOptions) -> TtnResult:
             continue
 
         header = asker.ask(_crop(image, zones.header), prompts.with_text_layer(prompts.HEADER.format(page=n), page.text), f"{tag}-header")
-        kind = str((header or {}).get("page_kind") or report.kind).split()[0].strip(" —-|")
-        report.kind = kind if kind in ("front", "continuation", "back", "other") else report.kind
+        report.kind = _page_kind(header, report.kind)
         if report.kind == "back":
             continue
         if header and report.kind == "front":

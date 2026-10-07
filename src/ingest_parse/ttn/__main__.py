@@ -31,6 +31,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-denoise", action="store_true", help="Skip denoising (faster).")
     p.add_argument("--repair-rounds", type=int, default=2, help="Re-read rounds for rows failing checks (default 2).")
     args = p.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):  # Windows: вывод в файл идёт в cp1251, «→» и кириллица имён не падают
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
 
     from ingest_parse.ttn.extract import TtnOptions, extract_ttn
     from ingest_parse.ttn.report import render

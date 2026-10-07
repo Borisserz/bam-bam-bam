@@ -99,7 +99,8 @@ def http_sender(url: str, model: str, max_tokens: int = 3000, timeout: float = 6
             "max_tokens": max_tokens,
             "temperature": 0,
         }
-        req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"})
+        base = url.rstrip("/").removesuffix("/v1/chat/completions").removesuffix("/v1")
+        req = urllib.request.Request(base + "/v1/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return str(json.load(resp)["choices"][0]["message"]["content"])
 

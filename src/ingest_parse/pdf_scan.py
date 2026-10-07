@@ -33,6 +33,7 @@ _REASON = {
     "vision_off": "vision is off",
     "vision_error": "vision API failed: {detail}",
     "vision_empty": "vision API returned no text",
+    "page_error": "page processing failed: {detail}",
 }
 _ROLE = {"picture": "figure", "chart": "figure", "table": "table"}
 _MASKED = {"page_header", "page_footer"}
@@ -43,7 +44,7 @@ _PAD_PT = 4.0  # поле вокруг выреза, пункты
 _MAX_ROWS = 10  # строк таблицы в одном куске для VLM
 _TILE_HEIGHT = 1600  # px: таблица без линий выше этого — куски по высоте
 _BAND_FACTOR = 1.5  # страница длиннее 1.5 × max_long_edge читается полосами
-_MARK = re.compile(r"\**\[(FIGURE|TABLE)\s+(\d+)\]\**")
+_MARK = re.compile(r"\**\\?\[(FIGURE|TABLE)\s+(\d+)\\?\]\**")
 _SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}")
 _COLOR = {"figure": "blue", "table": "green", "masked": "gray", "text": "red"}
 _OVER_TEXT = " over-text"  # рисунок поверх текста: на странице не закрашивается
@@ -83,7 +84,10 @@ def fill_scans(md: str, pdf_path: Path, numbers: list[int], media: MediaWriter |
         pdf = pdfium.PdfDocument(str(pdf_path))
         try:
             for number in numbers:
-                block = _page_block(pdf, number, media, Path(tmp), options)
+                try:
+                    block = _page_block(pdf, number, media, Path(tmp), options)
+                except Exception as exc:  # сбой разметки/кэша на одной странице — остальные страницы пишутся
+                    block = _failure(number, "page_error", f"{type(exc).__name__}: {exc}", None)
                 md = md.replace(SCAN_PLACEHOLDER.format(n=number), block, 1)
         finally:
             pdf.close()
@@ -99,6 +103,7 @@ def _complete(path: Path, prompt: str, mode: str, options: ScanOptions, cache_di
 
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
     model = getattr(options.client, "model", None)
+    mode = f"{mode}-{hashlib.sha1(prompt.encode()).hexdigest()[:8]}"  # правка промпта не отдаёт старый ответ
     cache = VisionCache(cache_dir / ".vision-cache")
     answer = None if options.force else cache.get(sha, mode, model)
     if answer is None:
