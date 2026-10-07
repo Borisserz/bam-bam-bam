@@ -16,12 +16,13 @@ import re
 import tempfile
 import warnings
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pypdfium2 as pdfium
-from PIL import ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
 from ingest_parse.media import MediaWriter, image_markdown
 from ingest_parse.pdf_layout import Region
@@ -396,8 +397,102 @@ def _figure(path: Path, link: str | None, k: int, number: int, options: ScanOpti
     return f"{block}\n\n{image_markdown(alt, link)}" if link is not None else block
 
 
-def _is_table(text: str) -> bool:
-    return sum(line.lstrip().startswith("|") for line in text.splitlines()) >= 2
+_LABEL_PREFIX = re.compile(r"^\s*\**\s*(Описание|Текст с изображения|Анализ)\s*:?\s*\**\s*:?\s*")
+
+
+class _HtmlTables(HTMLParser):
+    """<table> → строки ячеек; colspan повторяет пустые ячейки, чтобы столбцы не съезжали."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tables: list[list[list[str]]] = []
+        self._cell: list[str] | None = None
+        self._span = 1
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "table":
+            self.tables.append([])
+        elif tag == "tr" and self.tables:
+            self.tables[-1].append([])
+        elif tag in ("td", "th") and self.tables and self.tables[-1]:
+            self._cell = []
+            span = dict(attrs).get("colspan") or "1"
+            self._span = int(span) if span.isdigit() else 1
+        elif tag == "br" and self._cell is not None:
+            self._cell.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("td", "th") and self._cell is not None:
+            row = self.tables[-1][-1]
+            row.append(" ".join("".join(self._cell).split()).replace("|", "\\|"))
+            row.extend([""] * (self._span - 1))
+            self._cell = None
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+
+
+def _html_tables(text: str) -> list[str]:
+    parser = _HtmlTables()
+    parser.feed(text)
+    out = []
+    for rows in parser.tables:
+        rows = [r for r in rows if r]
+        if len(rows) < 2:
+            continue
+        width = max(len(r) for r in rows)
+        rows = [r + [""] * (width - len(r)) for r in rows]
+        lines = ["| " + " | ".join(rows[0]) + " |", "|" + "---|" * width]
+        out.append("\n".join(lines + ["| " + " | ".join(r) + " |" for r in rows[1:]]))
+    return out
+
+
+def _table_markdown(answer: str) -> str:
+    """Таблица из ответа VLM, где бы она ни была: без меток разделов, в ```-блоке, в «Описании», HTML."""
+    if "<table" in answer.lower():
+        return "\n\n".join(_html_tables(answer))
+    runs: list[list[str]] = [[]]
+    for line in answer.splitlines():
+        line = _LABEL_PREFIX.sub("", line).strip()
+        if line.startswith("|"):
+            runs[-1].append(line)
+        elif runs[-1]:
+            runs.append([])
+    return "\n\n".join("\n".join(run) for run in runs if len(run) >= 2)
+
+
+def _sharper(path: Path, tmp: Path) -> Path:
+    """Увеличенный и резкий вырез для второй попытки (другие байты — мимо кэша первой)."""
+    from PIL import ImageFilter
+
+    out = tmp / f"{path.stem}-retry.png"
+    with Image.open(path) as image:
+        big = image.convert("L").resize((int(image.width * 1.5), int(image.height * 1.5)), Image.Resampling.LANCZOS)
+    big.filter(ImageFilter.UnsharpMask(radius=2, percent=120, threshold=2)).save(out)
+    return out
+
+
+def _read_table(
+    path: Path, number: int, options: ScanOptions, kind: str, mode: str, tmp: Path
+) -> tuple[str, str]:
+    """(таблица, причина неудачи); не вышло — вторая попытка: увеличенный вырез и строгий промпт."""
+    from ingest_parse.vision import VisionError
+    from ingest_parse.vision.prompts import build_page_prompt, build_table_retry_prompt
+
+    reason = ""
+    tries = [(path, build_page_prompt(kind, number), mode), (None, build_table_retry_prompt(number), "table_retry")]
+    for image, prompt, try_mode in tries:
+        try:
+            answer = _complete(image or _sharper(path, tmp), prompt, try_mode, options, path.parent)
+        except VisionError as exc:
+            reason = f"vision API failed: {exc}"
+            continue
+        table = _table_markdown(answer)
+        if table:
+            return table, ""
+        reason = "no table in answer: " + _safe(answer)[:80]
+    return "", reason
 
 
 def _table(
@@ -406,7 +501,6 @@ def _table(
 ) -> str:
     """Таблица: ≤ 10 строк — один вырез; длиннее — куски по строкам, у каждого сверху шапка таблицы."""
     from ingest_parse.ttn.zones import table_chunks, table_zones
-    from ingest_parse.vision import VisionError
 
     zones = table_zones(page.image, box)
     tall = len(zones.rows) > _MAX_ROWS or (not zones.rows and box[3] - box[1] > _TILE_HEIGHT)
@@ -417,13 +511,16 @@ def _table(
         name = f"scan-{number:03d}-table-{k}.png" if len(pieces) == 1 else f"scan-{number:03d}-table-{k}-{j}.png"
         path, link = _save(piece, name, media, tmp)
         kind, mode = ("table_scan", "table_extract") if len(pieces) == 1 else ("table_tile", "table_tile")
-        try:
-            text = _vision(path, number, options, kind=kind, mode=mode).get(_TEXT, "").strip()
-        except VisionError:
-            text = ""
-        if _is_table(text):
+        text, reason = _read_table(path, number, options, kind, mode, tmp)
+        if text:
             texts.append(text)
         else:
+            part = "" if len(pieces) == 1 else f" part {j}"
+            warnings.warn(
+                f"pdf page {number}: table {k}{part} not extracted: {reason}; image link emitted",
+                PdfPageWarning,
+                stacklevel=4,
+            )
             label = alt if len(pieces) == 1 else f"{alt}, часть {j}"
             misses.append(image_markdown(label, link) if link is not None else f"<!-- {label}: not extracted -->")
     out = [_join_tables(texts)] if texts else []
