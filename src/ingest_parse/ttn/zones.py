@@ -21,7 +21,7 @@ _WIDE = 0.7  # доля ширины самой широкой таблицы: �
 _LABEL_COLUMN = 0.03  # метки полей формы начинаются у левого края текста, доля ширины страницы
 _LABEL_WIDTH = 0.15
 _OVERLAP = 0.02  # доля высоты страницы: шапка и низ заходят на таблицу
-_ROWS = 5  # горизонталей меньше — рамка реквизитов, не товарный раздел (шапка, номера, товар, итого)
+_COLUMNS = 6  # вертикалей меньше — рамка реквизитов (на 42 бланках до 5), у товарного раздела от 7
 
 
 @dataclass
@@ -195,17 +195,23 @@ def items_table(tables: list[Box], size: tuple[int, int], gray: np.ndarray | Non
     """Товарный раздел — верхняя из широких таблиц.
 
     Узкие таблицы выше — реквизиты шапки; широкие ниже (ТТН-1: погрузочно-разгрузочные операции) бывают крупнее.
-    Рамка реквизитов с плашкой бывает широкой: в ней мало строк — пропускается, если есть таблица со строками.
+    Рамка реквизитов с плашкой бывает широкой: в ней мало столбцов — пропускается, если есть таблица со столбцами.
     """
     w, h = size
     big = [b for b in tables if b[2] - b[0] >= _MIN_WIDTH * w and (b[2] - b[0]) * (b[3] - b[1]) >= _MIN_TABLE_SHARE * w * h]
     widest = max((b[2] - b[0] for b in big), default=0)  # бланк бывает в части листа — ширина от самой широкой
     wide = sorted((b for b in big if b[2] - b[0] >= _WIDE * widest), key=lambda b: b[1])
     if gray is not None and len(wide) > 1:
-        ruled = [b for b in wide if len(find_lines(gray, b)) >= _ROWS]
+        ruled = [b for b in wide if _column_lines(gray, b) >= _COLUMNS]
         if ruled:
             wide = ruled
     return wide[0] if wide else None
+
+
+def _column_lines(gray: np.ndarray, box: Box) -> int:
+    lines = find_lines(gray, box)
+    head = _head_bottom(lines) if len(lines) >= 4 else box[1]
+    return len(find_columns(gray, box, *_rows_span(lines, head, box)))
 
 
 def find_zones(image: Image.Image, regions: list[tuple[str, float, Box]] | None) -> Zones:

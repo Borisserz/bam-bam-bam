@@ -132,7 +132,8 @@ def _tables_in(horiz: np.ndarray, vert: np.ndarray, at: tuple[int, int], page: t
         rows = _runs(band[:, l:r].sum(axis=1) / 255 >= 0.4 * (r - l))
         # столбец таблицы идёт через всю её высоту; штрихи печати и перегородка в подписях — нет
         cols = _runs(vert[y0:y1, l:r].sum(axis=0) / 255 >= 0.5 * (y1 - y0))
-        if rows >= 3 and cols >= 3:
+        frame = y1 - y0 > 0.5 * h and cols < 6  # кайма скана / рамка листа: всё внутри — одна «таблица»
+        if rows >= 3 and cols >= 3 and not frame:
             t, b, l, r = _trim_banner(band, vert[y0:y1], l, r)
             out.append((at[0] + l, at[1] + y0 + t, at[0] + r, at[1] + y0 + b))
         elif depth > 0:
