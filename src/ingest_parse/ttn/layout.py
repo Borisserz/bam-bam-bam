@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from typing import Any
 
 import cv2
@@ -132,12 +133,49 @@ def _tables_in(horiz: np.ndarray, vert: np.ndarray, at: tuple[int, int], page: t
         # столбец таблицы идёт через всю её высоту; штрихи печати и перегородка в подписях — нет
         cols = _runs(vert[y0:y1, l:r].sum(axis=0) / 255 >= 0.5 * (y1 - y0))
         if rows >= 3 and cols >= 3:
-            out.append((at[0] + l, at[1] + y0, at[0] + r, at[1] + y1))
+            t, b, l, r = _trim_banner(band, vert[y0:y1], l, r)
+            out.append((at[0] + l, at[1] + y0 + t, at[0] + r, at[1] + y0 + b))
         elif depth > 0:
             inner = _drop_long(vert[y0:y1], 0.85 * (y1 - y0))
             if inner is not None:
                 out += _tables_in(band, inner, (at[0], at[1] + y0), page, depth - 1)
     return out
+
+
+def _trim_banner(horiz: np.ndarray, vert: np.ndarray, l: int, r: int) -> tuple[int, int, int, int]:
+    """Крайний ряд выше остальных вдвое и с ≤ 3 столбцами — плашка заголовка вплотную к таблице: отрезать.
+
+    Высокая шапка товарного раздела не режется — в ней столбцов столько же, сколько в таблице.
+    Возвращает (верх, низ) внутри полосы и края по x.
+    """
+    height = horiz.shape[0]
+    on = horiz[:, l:r].sum(axis=1) / 255 >= 0.4 * (r - l)
+    ys = [int(np.mean(run)) for run in np.split(np.flatnonzero(on), np.flatnonzero(np.diff(np.flatnonzero(on)) > 1) + 1) if run.size]
+    if len(ys) < 3:
+        return 0, height, l, r
+    segs = list(pairwise(ys))
+    first, last = segs[0], segs[-1]
+
+    def cols(a: int, b: int) -> int:
+        return _runs(vert[a:b, l:r].sum(axis=0) / 255 >= 0.8 * (b - a))
+
+    def banner(i: int) -> bool:
+        i %= len(segs)
+        a, b = segs[i]
+        rest = [y1 - y0 for j, (y0, y1) in enumerate(segs) if j != i]
+        return b - a > 2 * float(np.median(rest)) and cols(a, b) <= 3
+
+    while len(segs) >= 2 and (banner(0) or banner(-1)):
+        segs = segs[1:] if banner(0) else segs[:-1]
+    if segs[0] == first and segs[-1] == last:
+        return 0, height, l, r
+    # необрезанный край — как был: верхняя линия таблицы бывает рваной и в ряды не попадает
+    t = 0 if segs[0] == first else max(0, segs[0][0] - 4)
+    b = height if segs[-1] == last else min(height, segs[-1][1] + 5)
+    xs = np.flatnonzero(vert[t:b, l:r].sum(axis=0) / 255 >= 0.5 * (b - t))
+    if xs.size:
+        l, r = l + int(xs[0]), l + int(xs[-1]) + 1
+    return t, b, l, r
 
 
 def _row_span(band: np.ndarray, vert: np.ndarray, l: int, r: int) -> tuple[int, int]:

@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from ingest_parse.ttn.dots import LONG_EDGE, dots_layout, http_sender
 from ingest_parse.ttn.layout import Det, fuse, heron_layout, role, ruled_tables
-from ingest_parse.ttn.preprocess import prepare
+from ingest_parse.ttn.preprocess import prepare, without_stamps
 from ingest_parse.ttn.raster import rasterize
 
 _COLOR = {"table": (0, 160, 0), "picture": (0, 90, 255), "margin": (150, 150, 150), "text": (220, 0, 0), "container": (255, 150, 0), "ink": (170, 0, 200)}
@@ -145,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
             stem = f"{path.stem}-p{number}"
             prep = prepare(image, dpi)
             page = prep.image
-            gray = np.asarray(page.convert("L"), dtype=np.uint8)
+            gray = without_stamps(np.asarray(page.convert("L"), dtype=np.uint8), prep.stamps)
             t = time.time()
             heron = heron_layout(page, tiles=not args.no_tiles)
             heron_s = time.time() - t

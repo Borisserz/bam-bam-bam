@@ -15,7 +15,10 @@ from ingest_parse.pdf_layout import Region
 Box = tuple[int, int, int, int]  # l, t, r, b в пикселях
 
 MAX_ROWS = 10  # строк товара в одном куске для VLM
-_MIN_TABLE_SHARE = 0.08
+_MIN_TABLE_SHARE = 0.02
+_WIDE = 0.5  # доля ширины страницы
+_LABEL_COLUMN = 0.03  # метки полей формы начинаются у левого края текста, доля ширины страницы
+_LABEL_WIDTH = 0.15
 _OVERLAP = 0.02  # доля высоты страницы: шапка и низ заходят на таблицу
 
 
@@ -27,8 +30,9 @@ class Zones:
     footer: Box | None
     lines: list[int] = field(default_factory=list)  # y горизонтальных линий таблицы, по возрастанию
     head_bottom: int = 0  # где кончается шапка таблицы (названия и номера столбцов)
-    source: str = "bands"  # heron | bands
-    regions: list[tuple[str, float, Box]] = field(default_factory=list)  # Heron, для отладки
+    source: str = "bands"  # layout | heron | bands
+    regions: list[tuple[str, float, Box]] = field(default_factory=list)  # разметка страницы, для отладки
+    columns: list[int] = field(default_factory=list)  # x вертикальных линий сетки в строках данных
 
     @property
     def rows(self) -> list[tuple[int, int]]:
@@ -92,6 +96,54 @@ def _thin(gray: np.ndarray, y: int, l: int, r: int) -> bool:
     return hit.size == 0 or float(np.median(hit)) <= gap
 
 
+def find_columns(gray: np.ndarray, box: Box, top: int, bottom: int) -> list[int]:
+    """x вертикалей, проходящих ≥ половину высоты строк данных (top..bottom); выцветший кусок линии не мешает.
+
+    Только в пределах горизонталей строк (рамка листа рядом — не столбец); двойная линия — одна.
+    """
+    from ingest_parse.ttn.layout import _line_masks
+
+    l, _, r, _ = box
+    if bottom - top < 10 or r - l < 10:
+        return []
+    horiz, vert = _line_masks(gray)
+    rows = np.flatnonzero(horiz[top:bottom, l:r].sum(axis=0) / 255 >= 2)
+    if rows.size:
+        l, r = max(0, l + int(rows[0]) - 4), l + int(rows[-1]) + 5
+    on = vert[top:bottom, l:r].sum(axis=0) / 255 >= 0.5 * (bottom - top)
+    xs = np.flatnonzero(on)
+    if not xs.size:
+        return []
+    tol = max(3, int(0.01 * (r - l)))
+    out = [l + int(np.mean(run)) for run in np.split(xs, np.flatnonzero(np.diff(xs) > tol) + 1)]
+    if rows.size:  # бланк без боковых рамок: край строк — граница крайней ячейки (хвост линии за рамкой — нет)
+        if out[0] - l > 3 * tol:
+            out.insert(0, l + 4)
+        if r - out[-1] > 3 * tol:
+            out.append(r - 5)
+    return out
+
+
+def _rows_span(lines: list[int], head: int, box: Box) -> tuple[int, int]:
+    data = [y for y in lines if y >= head - 2]
+    return (data[0], data[-1]) if len(data) >= 2 else (head, box[3])
+
+
+def with_grid(image: Image.Image, z: Zones) -> Image.Image:
+    """Линии сетки в строках данных дорисованы чётко: на бледном скане VLM не путает столбцы."""
+    if len(z.columns) < 2:
+        return image
+    top, bottom = _rows_span(z.lines, z.head_bottom, z.table)
+    out = image.convert("L")
+    draw = ImageDraw.Draw(out)
+    for x in z.columns:
+        draw.line((x, top, x, bottom), fill=0, width=2)
+    for y in z.lines:
+        if top <= y <= bottom:
+            draw.line((z.columns[0], y, z.columns[-1], y), fill=0, width=2)
+    return out
+
+
 def _head_bottom(lines: list[int]) -> int:
     """Шапка таблицы — высокие полосы сверху (+ узкая строка номеров столбцов под ними)."""
     bands = np.diff(lines)
@@ -133,20 +185,30 @@ def table_zones(image: Image.Image, box: Box) -> Zones:
         head = _head_bottom(lines)
     else:
         lines, head = [], box[1] + int(0.12 * (box[3] - box[1]))
-    return Zones(image.size, (0, 0, image.width, box[1]), box, None, lines, head, "heron")
+    columns = find_columns(gray, box, *_rows_span(lines, head, box))
+    return Zones(image.size, (0, 0, image.width, box[1]), box, None, lines, head, "heron", columns=columns)
+
+
+def items_table(tables: list[Box], size: tuple[int, int]) -> Box | None:
+    """Товарный раздел — верхняя из широких таблиц.
+
+    Узкие таблицы выше — реквизиты шапки; широкие ниже (ТТН-1: погрузочно-разгрузочные операции) бывают крупнее.
+    """
+    w, h = size
+    wide = [b for b in tables if b[2] - b[0] >= _WIDE * w and (b[2] - b[0]) * (b[3] - b[1]) >= _MIN_TABLE_SHARE * w * h]
+    return min(wide, key=lambda b: b[1], default=None)
 
 
 def find_zones(image: Image.Image, regions: list[tuple[str, float, Box]] | None) -> Zones:
     w, h = image.size
     gray = np.asarray(image.convert("L"), dtype=np.uint8)
     overlap = int(_OVERLAP * h)
-    tables = [box for label, _, box in regions or [] if label == "table"]
-    tables = [b for b in tables if (b[2] - b[0]) * (b[3] - b[1]) >= _MIN_TABLE_SHARE * w * h]
-    if tables:
-        l, t, r, b = max(tables, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+    found = items_table([box for label, _, box in regions or [] if label == "table"], (w, h))
+    if found:
+        l, t, r, b = found
         pad = int(0.01 * w)
         table = (max(0, l - pad), max(0, t - overlap // 2), min(w, r + pad), min(h, b + overlap // 2))
-        source = "heron"
+        source = "layout"
     else:
         table = _ruled_block(gray) or (0, int(0.30 * h), w, int(0.88 * h))
         source = "bands"
@@ -157,7 +219,50 @@ def find_zones(image: Image.Image, regions: list[tuple[str, float, Box]] | None)
         head = _head_bottom(lines)
     else:
         lines, head = [], table[1] + int(0.15 * (table[3] - table[1]))
-    return Zones((w, h), header, table, footer, lines, head, source, list(regions or []))
+    columns = find_columns(gray, table, *_rows_span(lines, head, table))
+    return Zones((w, h), header, table, footer, lines, head, source, list(regions or []), columns)
+
+
+def form_fields(regions: list[tuple[str, float, Box]], zone: Box, width: int) -> list[tuple[Box, Box]]:
+    """Поля формы в zone: (метка, метка + значение). Метка — короткий текст в левой колонке бланка
+    («Грузоотправитель», «Основание отпуска»), значение — текст правее на той же строке.
+    """
+    zl, zt, zr, zb = zone
+    texts = [b for label, _, b in regions if label in ("text", "margin") and b[0] >= zl and b[1] >= zt and b[2] <= zr and b[3] <= zb]
+    if not texts:
+        return []
+    left = min(b[0] for b in texts)
+    labels = sorted((b for b in texts if b[0] <= left + _LABEL_COLUMN * width and b[2] - b[0] <= _LABEL_WIDTH * width), key=lambda b: b[1])
+    out: list[tuple[Box, Box]] = []
+    for lab in labels:
+        h = lab[3] - lab[1]
+        values = [b for b in texts if b[0] >= lab[2] - 5 and _same_line(lab, b) and _beside(lab, b, h)]
+        if values:
+            out.append((lab, (lab[0], min(b[1] for b in [lab, *values]), max(b[2] for b in values), max(b[3] for b in [lab, *values]))))
+    return out
+
+
+def _beside(label: Box, value: Box, h: int) -> bool:
+    """Значение на строке метки (или в две строки, метка у нижней); плашка заголовка ниже «Серия» — нет."""
+    cy = (value[1] + value[3]) / 2
+    return value[3] - value[1] <= 3 * h and label[1] - h <= cy <= label[3] + h / 2
+
+
+def _same_line(a: Box, b: Box) -> bool:
+    overlap = min(a[3], b[3]) - max(a[1], b[1])
+    return overlap >= 0.5 * min(a[3] - a[1], b[3] - b[1])
+
+
+def fields_image(image: Image.Image, pairs: list[tuple[Box, Box]], scale: float = 1.5) -> Image.Image | None:
+    """Поля формы стопкой, крупнее: без печатей, логотипов и соседних колонок бланка."""
+    if not pairs:
+        return None
+    pad = max(4, int(0.003 * image.height))
+    parts = []
+    for _, (l, t, r, b) in pairs:
+        crop = image.crop((max(0, l - pad), max(0, t - pad), min(image.width, r + pad), min(image.height, b + pad))).convert("L")
+        parts.append(crop.resize((int(crop.width * scale), int(crop.height * scale)), Image.Resampling.LANCZOS))
+    return stack(parts)
 
 
 def stack(parts: list[Image.Image]) -> Image.Image:
@@ -187,6 +292,7 @@ def row_image(image: Image.Image, z: Zones, rows: list[tuple[int, int]]) -> Imag
 
 def table_chunks(image: Image.Image, z: Zones, max_rows: int = MAX_ROWS) -> list[Chunk]:
     rows = z.rows
+    image = with_grid(image, z)
     if len(rows) >= 2:
         return [Chunk(row_image(image, z, rows[i : i + max_rows]), rows[i : i + max_rows]) for i in range(0, len(rows), max_rows)]
     # линий нет — куски по высоте с перекрытием; дубли строк убирает склейка

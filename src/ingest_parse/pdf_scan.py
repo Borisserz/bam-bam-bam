@@ -46,6 +46,7 @@ _BAND_FACTOR = 1.5  # страница длиннее 1.5 × max_long_edge чи�
 _MARK = re.compile(r"\**\[(FIGURE|TABLE)\s+(\d+)\]\**")
 _SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}")
 _COLOR = {"figure": "blue", "table": "green", "masked": "gray", "text": "red"}
+_OVER_TEXT = " over-text"  # рисунок поверх текста: на странице не закрашивается
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ class _Page:
     image: Any  # PIL, выровненная страница
     dpi: float
     steps: list[str]
+    stamps: Any = None  # bool-маска печатей по пикселям image (ttn.preprocess.stamp_mask) или None
 
 
 def _safe(text: str) -> str:
@@ -158,7 +160,7 @@ def _load(pdf: Any, number: int, options: ScanOptions, work: Path, cache_dir: Pa
 
     orient = _orienter(options, number, work, cache_dir) if options.client is not None else None
     prep = prepare(image, dpi, orient=orient)
-    return _Page(prep.image, prep.dpi, prep.steps)
+    return _Page(prep.image, prep.dpi, prep.steps, prep.stamps)
 
 
 def _regions(page: _Page, number: int, options: ScanOptions) -> list[Region] | None:
@@ -178,7 +180,9 @@ def _regions(page: _Page, number: int, options: ScanOptions) -> list[Region] | N
             dots, _ = dots_layout(page.image, options.dots)
         except Exception as exc:  # сервер dots недоступен — хватит Heron и линий
             warnings.warn(f"dots layout failed: {exc}; page {number} uses heron + lines", PdfPageWarning, stacklevel=4)
-    gray = np.asarray(page.image.convert("L"), dtype=np.uint8)
+    from ingest_parse.ttn.preprocess import without_stamps
+
+    gray = without_stamps(np.asarray(page.image.convert("L"), dtype=np.uint8), page.stamps)
     return [Region(_label(d), d.score, d.box) for d in fuse(page.image.size, heron, dots, ruled_tables(gray), gray)]
 
 
@@ -318,9 +322,18 @@ def _plan(regions: list[Region], size: tuple[float, float]) -> list[tuple[Region
         else:
             count[role] += 1
             use = f"{role} {count[role]}"
+            if role == "figure" and _over_text(r, regions):
+                use += _OVER_TEXT  # печать на подписях, «ОБРАЗЕЦ», плашка с заголовком: вырез есть, закраски нет
             taken.append(r)
         plan.append((r, use))
     return plan
+
+
+def _over_text(figure: Region, regions: list[Region]) -> bool:
+    return any(
+        o.label not in _MASKED and _ROLE.get(o.label) is None and _inside(o.box, figure.box) >= 0.3
+        for o in regions
+    )
 
 
 def _px(box: tuple[float, float, float, float], limit: tuple[int, int], pad: float) -> tuple[int, int, int, int]:
@@ -340,12 +353,12 @@ def _masked(image: Any, plan: list[tuple[Region, str]], dpi: float) -> Any:
     out = image.copy()
     draw = ImageDraw.Draw(out)
     for r, use in plan:
-        if use != "masked" and not use.startswith(("figure ", "table ")):
+        if use != "masked" and not use.startswith(("figure ", "table ")) or use.endswith(_OVER_TEXT):
             continue
         box = _px(r.box, image.size, dpi / 72)
         draw.rectangle(box, fill="white")
         if use != "masked":
-            role, k = use.split()
+            role, k = use.split()[:2]
             draw.text(
                 ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2),
                 f"[{role.upper()} {k}]",
@@ -396,7 +409,7 @@ def _crop_parts(
     parts = {}
     pad = _PAD_PT * page.dpi / 72
     for use, r in crops:
-        role, k = use.split()
+        role, k = use.split()[:2]
         box = _px(r.box, page.image.size, pad)
         if role == "figure":
             path, link = _save(page.image.crop(box), f"scan-{number:03d}-fig-{k}.png", media, tmp)
@@ -491,14 +504,17 @@ def _sharper(path: Path, tmp: Path) -> Path:
 
 
 def _read_table(
-    path: Path, number: int, options: ScanOptions, kind: str, mode: str, tmp: Path
+    path: Path, number: int, options: ScanOptions, kind: str, mode: str, tmp: Path, hint: str = ""
 ) -> tuple[str, str]:
     """(таблица, причина неудачи); не вышло — вторая попытка: увеличенный вырез и строгий промпт."""
     from ingest_parse.vision import VisionError
     from ingest_parse.vision.prompts import build_page_prompt, build_table_retry_prompt
 
     reason = ""
-    tries = [(path, build_page_prompt(kind, number), mode), (None, build_table_retry_prompt(number), "table_retry")]
+    tries = [
+        (path, build_page_prompt(kind, number) + hint, mode),
+        (None, build_table_retry_prompt(number) + hint, "table_retry"),
+    ]
     for image, prompt, try_mode in tries:
         try:
             answer = _complete(image or _sharper(path, tmp), prompt, try_mode, options, path.parent)
@@ -517,18 +533,20 @@ def _table(
     options: ScanOptions,
 ) -> str:
     """Таблица: ≤ 10 строк — один вырез; длиннее — куски по строкам, у каждого сверху шапка таблицы."""
-    from ingest_parse.ttn.zones import table_chunks, table_zones
+    from ingest_parse.ttn.prompts import grid_hint
+    from ingest_parse.ttn.zones import table_chunks, table_zones, with_grid
 
     zones = table_zones(page.image, box)
     tall = len(zones.rows) > _MAX_ROWS or (not zones.rows and box[3] - box[1] > _TILE_HEIGHT)
-    pieces = [c.image for c in table_chunks(page.image, zones, _MAX_ROWS)] if tall else [page.image.crop(box)]
+    pieces = [c.image for c in table_chunks(page.image, zones, _MAX_ROWS)] if tall else [with_grid(page.image, zones).crop(box)]
+    hint = grid_hint(len(zones.columns) - 1)
     alt = f"Таблица {k}, страница {number}"
     texts, misses = [], []
     for j, piece in enumerate(pieces, 1):
         name = f"scan-{number:03d}-table-{k}.png" if len(pieces) == 1 else f"scan-{number:03d}-table-{k}-{j}.png"
         path, link = _save(piece, name, media, tmp)
         kind, mode = ("table_scan", "table_extract") if len(pieces) == 1 else ("table_tile", "table_tile")
-        text, reason = _read_table(path, number, options, kind, mode, tmp)
+        text, reason = _read_table(path, number, options, kind, mode, tmp, hint)
         if text:
             texts.append(text)
         else:

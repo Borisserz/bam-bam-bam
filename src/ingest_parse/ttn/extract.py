@@ -27,10 +27,22 @@ from ingest_parse.ttn.schema import (
     waybill_from_dict,
 )
 from ingest_parse.ttn.validate import Issue, check_item, check_requisites, check_totals, validate
-from ingest_parse.ttn.zones import Box, Zones, draw_zones, find_zones, heron_regions, row_image, stack, table_chunks
+from ingest_parse.ttn.zones import (
+    Box,
+    Zones,
+    draw_zones,
+    fields_image,
+    find_zones,
+    form_fields,
+    row_image,
+    stack,
+    table_chunks,
+)
 
 _TOTAL_ROW = re.compile(r"^\s*(итого|всего)\b", re.I)
 _REQUISITE_CODES = {"series", "number", "date", "shipper_unp", "consignee_unp"}
+_FIELD_KEYS = {"shipper", "consignee", "carrier_customer", "basis", "loading_point", "unloading_point", "vehicle",
+               "trailer", "waybill", "driver"}  # то, что есть в полосе полей формы; реквизиты бланка — нет
 
 
 class TtnWarning(UserWarning):
@@ -155,6 +167,18 @@ def _orient(asker: _Asker, name: str):
     return check
 
 
+def ttn_layout(image: Image.Image, stamps: Any, heron: bool = True) -> list[tuple[str, float, Box]]:
+    """Разметка как в pdf_scan: Heron (страница + половины), сетка линий бланка без печатей, слияние."""
+    import numpy as np
+
+    from ingest_parse.ttn.layout import fuse, heron_layout, ruled_tables
+    from ingest_parse.ttn.preprocess import without_stamps
+
+    gray = without_stamps(np.asarray(image.convert("L"), dtype=np.uint8), stamps)
+    dets = heron_layout(image) if heron else []
+    return [(d.role, d.score, d.box) for d in fuse(image.size, dets, [], ruled_tables(gray), gray)]
+
+
 def _crop(image: Image.Image, box: Box) -> Image.Image:
     return image.crop(box)
 
@@ -170,6 +194,21 @@ def _merge_header(target: Waybill, data: dict[str, Any]) -> None:
                     setattr(mine, f.name, getattr(theirs, f.name))
         elif getattr(target, name) is None:
             setattr(target, name, getattr(parsed, name))
+
+
+def _read_fields(
+    asker: _Asker, image: Image.Image, regions: list[tuple[str, float, Box]], zones: Zones, page: int,
+    waybill: Waybill, report: PageReport, work: Path, rel: Any,
+) -> None:
+    """Стороны не прочитаны по всей шапке — поля формы «метка → значение» стопкой, крупнее; заполняются только пустые."""
+    strip = fields_image(image, form_fields(regions, zones.header, image.width))
+    if strip is None:
+        return
+    name = f"page-{page:02d}-header-fields"
+    data = asker.ask(strip, prompts.FIELDS.format(page=page), name)
+    report.images["поля формы"] = rel(work / f"{name}.png")
+    if data:
+        _merge_header(waybill, {k: v for k, v in data.items() if k in _FIELD_KEYS})
 
 
 def _merge_totals(target: Totals, data: dict[str, Any] | None) -> None:
@@ -205,12 +244,11 @@ def extract_ttn(path: Path, out_dir: Path, options: TtnOptions) -> TtnResult:
         check = _orient(asker, f"{tag}-orientation") if options.orientation and asker is not None else None
         prep = prepare(page.image, page.dpi, orient=check, denoise=options.denoise)
         image = prep.image
-        regions = None
-        if options.heron:
-            try:
-                regions = heron_regions(image, prep.dpi)
-            except Exception as exc:  # noqa: BLE001 — модель раскладки не скачана / сбой Docling
-                warnings.warn(f"{path.name} page {n}: heron failed ({exc}); using fixed bands", TtnWarning, stacklevel=2)
+        try:
+            regions = ttn_layout(image, prep.stamps, heron=options.heron)
+        except Exception as exc:  # noqa: BLE001 — модель раскладки не скачана / сбой Docling
+            warnings.warn(f"{path.name} page {n}: heron failed ({exc}); using ruled lines", TtnWarning, stacklevel=2)
+            regions = ttn_layout(image, prep.stamps, heron=False)
         zones = find_zones(image, regions)
         contexts[n] = _Context(image, zones, page.text)
         chunks = table_chunks(image, zones)
@@ -225,6 +263,9 @@ def extract_ttn(path: Path, out_dir: Path, options: TtnOptions) -> TtnResult:
             for k, chunk in enumerate(chunks, 1):
                 chunk.image.save(work / f"{tag}-table-{k}.png")
             _crop(image, zones.header).save(work / f"{tag}-header.png")
+            strip = fields_image(image, form_fields(regions, zones.header, image.width))
+            if strip is not None:
+                strip.save(work / f"{tag}-header-fields.png")
             continue
 
         header = asker.ask(_crop(image, zones.header), prompts.with_text_layer(prompts.HEADER.format(page=n), page.text), f"{tag}-header")
@@ -234,8 +275,11 @@ def extract_ttn(path: Path, out_dir: Path, options: TtnOptions) -> TtnResult:
             continue
         if header and report.kind == "front":
             _merge_header(waybill, header)
+            if not (waybill.shipper.name and waybill.consignee.name):
+                _read_fields(asker, image, regions, zones, n, waybill, report, work, rel)
         for k, chunk in enumerate(chunks, 1):
-            data = asker.ask(chunk.image, prompts.with_text_layer(prompts.ITEMS.format(page=n), page.text), f"{tag}-table-{k}")
+            prompt = prompts.ITEMS.format(page=n) + prompts.grid_hint(len(zones.columns) - 1)
+            data = asker.ask(chunk.image, prompts.with_text_layer(prompt, page.text), f"{tag}-table-{k}")
             rows = [r for r in (data or {}).get("items") or [] if isinstance(r, dict)]
             for j, row in enumerate(rows):
                 item = item_from_dict(row, page=n)

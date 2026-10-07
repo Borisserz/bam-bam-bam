@@ -20,6 +20,33 @@ class Prepared:
     rotation: int = 0  # итоговый поворот против часовой: 0 / 90 / 180 / 270
     skew: float = 0.0  # исправленный наклон, градусы
     steps: list[str] = field(default_factory=list)
+    stamps: np.ndarray | None = None  # bool по пикселям image: синие/фиолетовые печати; None — скан серый
+
+
+def stamp_mask(image: Image.Image) -> np.ndarray | None:
+    """Печати по цвету: насыщенные тёмные синие/фиолетовые пятна размером с печать; None — нет цвета.
+
+    Бирюзовый защитный фон бланка бледный, синяя рукопись и подпись вытянуты в строку — их маска не берёт.
+    """
+    if image.mode not in ("RGB", "RGBA", "P", "CMYK"):
+        return None
+    rgb = np.asarray(image.convert("RGB"))
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    hue, sat, val = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    ink = ((sat >= 70) & (val <= 200) & (hue >= 100) & (hue <= 160)).astype(np.uint8) * 255
+    if not ink.any():
+        return np.zeros(ink.shape, dtype=bool)
+    ink = _without_lines(ink, 30)  # бланк ТН-2 печатают синей краской: его линии — не печать
+    w = ink.shape[1]
+    k = max(5, w // 100)
+    blobs = cv2.dilate(ink, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(blobs, connectivity=8)
+    keep = np.zeros(count, dtype=bool)
+    for i in range(1, count):
+        _, _, bw, bh, _ = stats[i]
+        if bw >= 0.05 * w and bh >= 0.05 * w and 0.4 <= bw / bh <= 2.5:
+            keep[i] = True  # круглая / квадратная печать, штамп; строка рукописи сюда не проходит
+    return keep[labels] & (ink > 0)
 
 
 def _gray(image: Image.Image) -> np.ndarray:
@@ -31,6 +58,15 @@ def _ink(gray: np.ndarray) -> np.ndarray:
     scale = _WORK_WIDTH / max(gray.shape[1], 1)
     small = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else gray
     return cv2.adaptiveThreshold(small, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 31, 15)
+
+
+def _without_lines(ink: np.ndarray, part: int = 10) -> np.ndarray:
+    """Маска без длинных прямых (≥ 1/part стороны): линии таблиц, подчёркивания, рамки."""
+    h, w = ink.shape
+    horiz = cv2.morphologyEx(ink, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (max(15, w // part), 1)))
+    vert = cv2.morphologyEx(ink, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(15, h // part))))
+    lines = cv2.dilate(horiz | vert, np.ones((3, 3), np.uint8))
+    return cv2.bitwise_and(ink, cv2.bitwise_not(lines))
 
 
 def _rotate(img: np.ndarray, angle: float, fill: int = 0) -> np.ndarray:
@@ -56,15 +92,22 @@ def detect_skew(gray: np.ndarray, limit: float = 10.0) -> float:
     return round(best(np.arange(coarse - 0.5, coarse + 0.51, 0.05)), 2)
 
 
-def is_sideways(gray: np.ndarray, limit: float = 10.0) -> bool:
-    """Строки идут вертикально (страница на боку): при лучшем угле профиль по столбцам чётче, чем по строкам."""
-    ink = _ink(gray)
-    angles = np.arange(-limit, limit + 0.01, 1.0)
+def _text_lines(ink: np.ndarray) -> int:
+    """Буквы, склеенные вдоль строки: вытянутые по горизонтали куски ≈ строки текста."""
+    joined = cv2.dilate(ink, np.ones((1, 9), np.uint8))
+    count, _, stats, _ = cv2.connectedComponentsWithStats(joined, connectivity=8)
+    return sum(1 for _, _, w, h, _ in stats[1:count] if w >= 40 and w >= 5 * h and h >= 4)
 
-    def best(img: np.ndarray) -> float:
-        return max(_sharpness(_rotate(img, a)) for a in angles)
 
-    return best(np.ascontiguousarray(ink.T)) > 1.3 * best(ink)
+def is_sideways(gray: np.ndarray) -> bool:
+    """Строки идут вертикально (страница на боку): вертикальных строк текста заметно больше горизонтальных.
+
+    Линии бланка — не текст и вычитаются: столбцы пустой таблицы на стоящем листе иначе похожи на строки на
+    боку. Профили яркости тут не годятся — защитный фон бланка (гильош) даёт ложную «полосатость».
+    На 22 реальных сканах: стоя ≤ 0.9, на боку ≥ 2.
+    """
+    ink = cv2.medianBlur(_without_lines(_ink(gray)), 3)
+    return _text_lines(np.ascontiguousarray(ink.T)) > 1.4 * max(1, _text_lines(ink))
 
 
 def normalize_light(gray: np.ndarray, dpi: float) -> np.ndarray:
@@ -97,19 +140,25 @@ def prepare(
 ) -> Prepared:
     """orient(картинка) → на сколько градусов по часовой повернуть (0/90/180/270; спрашиваем VLM); None — не спрашивать."""
     gray = _gray(image)
+    stamps = stamp_mask(image)
+    marks = stamps.astype(np.uint8) * 255 if stamps is not None else None  # повороты — те же, что у gray
     out = Prepared(image, dpi)
     if dpi < TARGET_DPI - 10:
         factor = TARGET_DPI / dpi
         gray = cv2.resize(gray, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
+        if marks is not None:
+            marks = cv2.resize(marks, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_NEAREST)
         out.dpi = TARGET_DPI
         out.steps.append(f"upscale {dpi:.0f}→{TARGET_DPI} dpi")
     if is_sideways(gray):
         gray = cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE)
+        marks = cv2.rotate(marks, cv2.ROTATE_90_CLOCKWISE) if marks is not None else None
         out.rotation = 270
         out.steps.append("rotate 90° (sideways)")
     skew = detect_skew(gray)
     if abs(skew) >= 0.1:
         gray = _rotate(gray, skew, fill=255)
+        marks = _rotate(marks, skew, fill=0) if marks is not None else None
         out.skew = skew
         out.steps.append(f"deskew {skew:+.2f}°")
     gray = normalize_light(gray, out.dpi)
@@ -122,12 +171,43 @@ def prepare(
     turn = orient(Image.fromarray(gray)) % 360 if orient is not None else 0
     if turn == 180:
         gray = cv2.rotate(gray, _CV_ROTATE[180])
+        marks = cv2.rotate(marks, _CV_ROTATE[180]) if marks is not None else None
         out.rotation = (out.rotation + 180) % 360
         out.steps.append("rotate 180° clockwise (vision)")
     elif turn:
         # строки уже горизонтальны (геометрия выше); 90/270 от VLM — частая ошибка, лист на бок не кладём
         out.steps.append(f"vision said {turn}°, ignored")
     out.image = Image.fromarray(gray)
+    if marks is not None:
+        out.stamps = marks > 127
+        if out.stamps.any():
+            out.steps.append(f"stamps {out.stamps.mean():.2%}")
+    return out
+
+
+def _long(mask: np.ndarray, length: int, *, vertical: bool) -> np.ndarray:
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    along = stats[:, cv2.CC_STAT_HEIGHT] if vertical else stats[:, cv2.CC_STAT_WIDTH]
+    keep = along >= length
+    keep[0] = False
+    return keep[labels].astype(np.uint8) * 255
+
+
+def without_stamps(gray: np.ndarray, stamps: np.ndarray | None) -> np.ndarray:
+    """Серое для поиска линий и чернил: пиксели печатей — бумага (VLM видит страницу как есть).
+
+    Линии бланка не стираются, даже если маска на них попала: синяя краска бланка ТН-2 близка к печати.
+    """
+    if stamps is None or not stamps.any():
+        return gray
+    from ingest_parse.ttn.layout import _line_masks
+
+    horiz, vert = _line_masks(gray)
+    h, w = gray.shape
+    keep = _long(horiz, w // 20, vertical=False) | _long(vert, int(0.03 * h), vertical=True)  # штрихи печати короче
+    lines = cv2.dilate(keep, np.ones((5, 5), np.uint8)) > 0
+    out = gray.copy()
+    out[(cv2.dilate(stamps.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0) & ~lines] = 255
     return out
 
 
