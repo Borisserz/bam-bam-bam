@@ -16,7 +16,8 @@ Box = tuple[int, int, int, int]  # l, t, r, b в пикселях
 
 MAX_ROWS = 10  # строк товара в одном куске для VLM
 _MIN_TABLE_SHARE = 0.02
-_WIDE = 0.5  # доля ширины страницы
+_MIN_WIDTH = 0.3  # доля ширины страницы
+_WIDE = 0.7  # доля ширины самой широкой таблицы: реквизиты шапки уже товарного раздела
 _LABEL_COLUMN = 0.03  # метки полей формы начинаются у левого края текста, доля ширины страницы
 _LABEL_WIDTH = 0.15
 _OVERLAP = 0.02  # доля высоты страницы: шапка и низ заходят на таблицу
@@ -195,8 +196,9 @@ def items_table(tables: list[Box], size: tuple[int, int]) -> Box | None:
     Узкие таблицы выше — реквизиты шапки; широкие ниже (ТТН-1: погрузочно-разгрузочные операции) бывают крупнее.
     """
     w, h = size
-    wide = [b for b in tables if b[2] - b[0] >= _WIDE * w and (b[2] - b[0]) * (b[3] - b[1]) >= _MIN_TABLE_SHARE * w * h]
-    return min(wide, key=lambda b: b[1], default=None)
+    big = [b for b in tables if b[2] - b[0] >= _MIN_WIDTH * w and (b[2] - b[0]) * (b[3] - b[1]) >= _MIN_TABLE_SHARE * w * h]
+    widest = max((b[2] - b[0] for b in big), default=0)  # бланк бывает в части листа — ширина от самой широкой
+    return min((b for b in big if b[2] - b[0] >= _WIDE * widest), key=lambda b: b[1], default=None)
 
 
 def find_zones(image: Image.Image, regions: list[tuple[str, float, Box]] | None) -> Zones:
