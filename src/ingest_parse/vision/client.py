@@ -41,6 +41,7 @@ class VisionConfig:
     max_retries: int = 2
     max_long_edge: int = 2048
     temperature: float = 0.2
+    reasoning: str = "low"  # off | low | medium | high; размышление модели — основное время ответа
 
     @property
     def endpoint(self) -> str:
@@ -63,7 +64,18 @@ class VisionConfig:
             timeout_s=_number("INGEST_VISION_TIMEOUT_S", 300, float),
             max_retries=_number("INGEST_VISION_MAX_RETRIES", 2, int),
             max_long_edge=_number("INGEST_VISION_MAX_LONG_EDGE", 2048, int),
+            reasoning=_reasoning(),
         )
+
+
+_REASONING = ("off", "low", "medium", "high")
+
+
+def _reasoning() -> str:
+    raw = (_env("INGEST_VISION_REASONING") or "low").lower()
+    if raw not in _REASONING:
+        raise VisionConfigError(f"INGEST_VISION_REASONING={raw!r}: expected one of {', '.join(_REASONING)}")
+    return raw
 
 
 def _number(name: str, default: Any, kind: Callable[[str], Any]) -> Any:
@@ -74,7 +86,12 @@ def _number(name: str, default: Any, kind: Callable[[str], Any]) -> Any:
         raise VisionConfigError(f"{name}={raw!r} is not a number") from exc
 
 
-def build_body(prompt: str, image_url: str, model: str | None = None, temperature: float = 0.2) -> dict[str, Any]:
+def build_body(
+    prompt: str, image_url: str, model: str | None = None, temperature: float = 0.2, reasoning: str = "low"
+) -> dict[str, Any]:
+    thinking: dict[str, Any] = (
+        {"enable_thinking": False} if reasoning == "off" else {"enable_thinking": True, "resolved_reasoning_effort": reasoning}
+    )
     body: dict[str, Any] = {
         "messages": [
             {"role": "system", "content": ""},
@@ -87,7 +104,7 @@ def build_body(prompt: str, image_url: str, model: str | None = None, temperatur
             },
         ],
         "temperature": temperature,
-        "chat_template_kwargs": {"enable_thinking": True, "resolved_reasoning_effort": "high"},
+        "chat_template_kwargs": thinking,
     }
     if model:
         body["model"] = model
@@ -125,7 +142,8 @@ class VisionClient:
         self._sleep = sleep
 
     def complete(self, prompt: str, image_url: str) -> str:
-        data = json.dumps(build_body(prompt, image_url, self.model, self.config.temperature)).encode("utf-8")
+        body = build_body(prompt, image_url, self.model, self.config.temperature, self.config.reasoning)
+        data = json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"

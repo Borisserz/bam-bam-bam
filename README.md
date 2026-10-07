@@ -286,13 +286,14 @@ uv run ingest-parse report.docx -o out\report.md --vision
 | `VISION_API_BASE_URL` (или `INGEST_VISION_API_BASE_URL`) | — (обязательна для `--vision`) | адрес сервера; `/v1` в конце можно не писать |
 | `VISION_API_KEY` (или `INGEST_VISION_API_KEY`) | пусто | если задан — `Authorization: Bearer …` |
 | `VISION_MODEL` (или `INGEST_VISION_MODEL`) | не передаётся | поле `model` — только если сервер его требует |
-| `INGEST_VISION_TIMEOUT_S` | `60` | таймаут запроса, с |
+| `INGEST_VISION_TIMEOUT_S` | `300` | таймаут запроса, с; после таймаута запрос не повторяется |
 | `INGEST_VISION_MAX_RETRIES` | `2` | повторы при сетевой ошибке / 5xx / 429 |
 | `INGEST_VISION_MAX_LONG_EDGE` | `2048` | картинка больше — уменьшается в памяти перед отправкой (файл не меняется) |
+| `INGEST_VISION_REASONING` | `low` | размышление модели: `off` / `low` / `medium` / `high`; меньше — быстрее ответ |
 
 Тело запроса: `messages` (пустой `system` + `user` с текстом и `image_url` = `data:image/png;base64,…`),
-`temperature: 0.2`, `chat_template_kwargs: {"enable_thinking": true, "resolved_reasoning_effort": "high"}`.
-`<think>…</think>` в ответе отбрасывается.
+`temperature: 0.2`, `chat_template_kwargs: {"enable_thinking": true, "resolved_reasoning_effort": "low"}`
+(при `off` — `{"enable_thinking": false}`). Рассуждение до `</think>` в ответе отбрасывается.
 
 - страницы-сканы PDF (`scan-*`) уходят на VLM ещё при разборе, с промптом «перепиши страницу в Markdown»
   (см. [Сканы](#сканы-в-pdf)); второй раз как картинка они не описываются;
@@ -491,7 +492,7 @@ uv run pytest -q tests\test_ttn.py                        # только нак�
 | кракозябры в консоли | писать в файл через `-o`, stdout всегда UTF-8 |
 | `ingest-ttn`: `CHECK` на хорошем скане | открыть `page-NN-zones.png`: найдена ли таблица и строки; затем `.ttn.md` → «Проверки» |
 | `ingest-ttn`: HTTP 400/413 от модели | сервер не принимает большие картинки: `$env:INGEST_VISION_MAX_LONG_EDGE = "2048"` |
-| `ingest-ttn`: таймауты | `$env:INGEST_VISION_TIMEOUT_S = "300"` |
+| `ingest-ttn`: таймауты / долгие ответы | `$env:INGEST_VISION_REASONING = "off"`; если не помогло — `$env:INGEST_VISION_TIMEOUT_S = "600"` |
 
 ## Не делает (осознанно)
 
