@@ -37,6 +37,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="PDF scans: run Heron layout (boxes in <media>/debug/); with --vision, figures and tables go to VLM as crops.",
     )
+    p.add_argument(
+        "--no-preprocess",
+        action="store_true",
+        help="PDF scans: plain 2x render (no native dpi, rotation, deskew, light/noise cleanup, orientation question).",
+    )
     args = p.parse_args(argv)
 
     vision = args.vision or args.vision_force
@@ -68,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
                 vision_force=args.vision_force,
                 links_base=args.output.parent if args.output else None,
                 scan_layout=args.scan_layout,
+                scan_preprocess=not args.no_preprocess,
             )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

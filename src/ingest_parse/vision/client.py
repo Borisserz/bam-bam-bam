@@ -39,6 +39,7 @@ class VisionConfig:
     timeout_s: float = 60.0
     max_retries: int = 2
     max_long_edge: int = 2048
+    temperature: float = 0.2
 
     @property
     def endpoint(self) -> str:
@@ -64,7 +65,7 @@ class VisionConfig:
         )
 
 
-def build_body(prompt: str, image_url: str, model: str | None = None) -> dict[str, Any]:
+def build_body(prompt: str, image_url: str, model: str | None = None, temperature: float = 0.2) -> dict[str, Any]:
     body: dict[str, Any] = {
         "messages": [
             {"role": "system", "content": ""},
@@ -76,7 +77,7 @@ def build_body(prompt: str, image_url: str, model: str | None = None) -> dict[st
                 ],
             },
         ],
-        "temperature": 0.2,
+        "temperature": temperature,
         "chat_template_kwargs": {"enable_thinking": True, "resolved_reasoning_effort": "high"},
     }
     if model:
@@ -104,7 +105,7 @@ class VisionClient:
         self._sleep = sleep
 
     def complete(self, prompt: str, image_url: str) -> str:
-        data = json.dumps(build_body(prompt, image_url, self.model)).encode("utf-8")
+        data = json.dumps(build_body(prompt, image_url, self.model, self.config.temperature)).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"

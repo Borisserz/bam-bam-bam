@@ -1,13 +1,17 @@
 """Страницы-сканы PDF: PNG (pypdfium2) → VLM (--vision), иначе заглушка со ссылкой на PNG.
 
-С layout (--scan-layout): Heron размечает страницу; рисунки и таблицы вырезаются и уходят в VLM
-отдельно, на копии страницы они закрашены и помечены [FIGURE K] / [TABLE K].
+Предобработка (по умолчанию): родное разрешение скана, лист на боку, наклон, освещение, шум;
+на сколько повернуть (0/90/180/270) — спрашиваем VLM.
+С layout (--scan-layout): Heron размечает выровненную страницу; рисунки и таблицы вырезаются и уходят
+в VLM отдельно (длинная таблица — кусками по строкам с её шапкой), на копии страницы они закрашены и
+помечены [FIGURE K] / [TABLE K]; высокая страница читается полосами по промежуткам между областями.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import tempfile
 import warnings
@@ -15,10 +19,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pypdfium2 as pdfium
 from PIL import ImageDraw, ImageFont
 
-from ingest_parse import pdf_layout
 from ingest_parse.media import MediaWriter, image_markdown
 from ingest_parse.pdf_layout import Region
 from ingest_parse.pdf_triage import SCAN_PLACEHOLDER, PdfPageWarning
@@ -32,12 +36,14 @@ _REASON = {
 _ROLE = {"picture": "figure", "chart": "figure", "table": "table"}
 _MASKED = {"page_header", "page_footer"}
 _MIN_CONFIDENCE = 0.5
-_PAGE_SHARE = 0.6  # область больше — страница-схема, режется не она, а вся страница целиком идёт в VLM
+_PAGE_SHARE = 0.6  # рисунок больше — страница-схема, читается целиком (таблицы режутся при любом размере)
 _INSIDE_SHARE = 0.8
-_RENDER_SCALE = 2
-_CROP_SCALE = 4
-_PAD = 4.0  # пункты PDF вокруг выреза
+_PAD_PT = 4.0  # поле вокруг выреза, пункты
+_MAX_ROWS = 10  # строк таблицы в одном куске для VLM
+_TILE_HEIGHT = 1600  # px: таблица без линий выше этого — куски по высоте
+_BAND_FACTOR = 1.5  # страница длиннее 1.5 × max_long_edge читается полосами
 _MARK = re.compile(r"\**\[(FIGURE|TABLE)\s+(\d+)\]\**")
+_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}")
 _COLOR = {"figure": "blue", "table": "green", "masked": "gray", "text": "red"}
 
 
@@ -47,6 +53,14 @@ class ScanOptions:
     force: bool = False
     max_long_edge: int = 2048
     layout: bool = False  # Heron на страницах-сканах
+    preprocess: bool = True  # поворот, наклон, свет, шум; False — простой рендер ×2
+
+
+@dataclass
+class _Page:
+    image: Any  # PIL, выровненная страница
+    dpi: float
+    steps: list[str]
 
 
 def _safe(text: str) -> str:
@@ -61,40 +75,109 @@ def fill_scans(md: str, pdf_path: Path, numbers: list[int], media: MediaWriter |
     """Каждую заглушку <!-- page N: scanned … --> заменить блоком pdf-scan; ошибка одной страницы не роняет файл."""
     if not numbers:
         return md
-    layouts = None
-    if options.layout:
-        try:
-            layouts = pdf_layout.detect_layout(pdf_path, numbers)
-        except Exception as exc:  # модель не скачана, сбой Docling — сканы идут без раскладки
-            warnings.warn(f"heron layout failed: {exc}; scans go without layout", PdfPageWarning, stacklevel=3)
     with tempfile.TemporaryDirectory(prefix="ingest-parse-scan-", ignore_cleanup_errors=True) as tmp:
         pdf = pdfium.PdfDocument(str(pdf_path))
         try:
             for number in numbers:
-                regions = layouts.get(number) if layouts is not None else None
-                block = _page_block(pdf, number, media, Path(tmp), options, regions)
+                block = _page_block(pdf, number, media, Path(tmp), options)
                 md = md.replace(SCAN_PLACEHOLDER.format(n=number), block, 1)
         finally:
             pdf.close()
     return md
 
 
-def _render(pdf: Any, number: int, scale: float) -> tuple[Any, tuple[float, float]]:
+# --- VLM ---
+
+
+def _complete(path: Path, prompt: str, mode: str, options: ScanOptions, cache_dir: Path) -> str:
+    from ingest_parse.vision.cache import VisionCache
+    from ingest_parse.vision.enrich import image_payload
+
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    model = getattr(options.client, "model", None)
+    cache = VisionCache(cache_dir / ".vision-cache")
+    answer = None if options.force else cache.get(sha, mode, model)
+    if answer is None:
+        answer = options.client.complete(prompt, image_payload(path, max_long_edge=options.max_long_edge))
+        cache.put(sha, mode, model, answer)
+    return answer
+
+
+def _vision(
+    path: Path,
+    number: int,
+    options: ScanOptions,
+    *,
+    kind: str = "text_scan",
+    mode: str = "page_extract",
+    markers: bool = False,
+    part: tuple[int, int] | None = None,
+    cache_dir: Path | None = None,
+) -> dict[str, str]:
+    from ingest_parse.vision.prompts import build_page_prompt, parse_sections
+
+    prompt = build_page_prompt(kind, number, markers=markers, part=part)
+    return parse_sections(_complete(path, prompt, mode, options, cache_dir or path.parent))
+
+
+def _orienter(options: ScanOptions, number: int, work: Path, cache_dir: Path):
+    """VLM по уменьшенной странице говорит, на сколько градусов по часовой повернуть; сбой — не крутим."""
+    from ingest_parse.ttn.prompts import ORIENTATION, parse_json, parse_rotation
+    from ingest_parse.vision import VisionError
+
+    def ask(image: Any) -> int:
+        thumb = image.copy()
+        thumb.thumbnail((1024, 1024))
+        path = work / f"scan-{number:03d}-orient.png"
+        thumb.save(path)
+        try:
+            return parse_rotation(parse_json(_complete(path, ORIENTATION, "orientation", options, cache_dir)))
+        except VisionError:
+            return 0
+
+    return ask
+
+
+# --- страница ---
+
+
+def _load(pdf: Any, number: int, options: ScanOptions, work: Path, cache_dir: Path) -> _Page:
+    from ingest_parse.ttn.raster import MAX_DPI, MIN_DPI, _native_dpi
+
     page = pdf[number - 1]
     try:
-        return page.render(scale=scale).to_pil(), page.get_size()
+        if not options.preprocess:
+            return _Page(page.render(scale=2).to_pil(), 144.0, [])
+        native = _native_dpi(page)
+        dpi = min(MAX_DPI, max(MIN_DPI, native or MIN_DPI))
+        image = page.render(scale=dpi / 72).to_pil()
     finally:
         page.close()
+    from ingest_parse.ttn.preprocess import prepare
+
+    orient = _orienter(options, number, work, cache_dir) if options.client is not None else None
+    prep = prepare(image, dpi, orient=orient)
+    return _Page(prep.image, prep.dpi, prep.steps)
 
 
-def _page_block(
-    pdf: Any, number: int, media: MediaWriter | None, tmp: Path, options: ScanOptions, regions: list[Region] | None
-) -> str:
+def _regions(page: _Page, number: int) -> list[Region] | None:
+    from ingest_parse.ttn.zones import heron_regions
+
     try:
-        image, size = _render(pdf, number, _RENDER_SCALE)
+        return [Region(label, conf, box) for label, conf, box in heron_regions(page.image, page.dpi)]
+    except Exception as exc:  # модель не скачана, сбой Docling — страница идёт без раскладки
+        warnings.warn(f"heron layout failed: {exc}; page {number} goes without layout", PdfPageWarning, stacklevel=4)
+        return None
+
+
+def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, options: ScanOptions) -> str:
+    cache_dir = media.directory if media is not None else tmp
+    try:
+        page = _load(pdf, number, options, tmp, cache_dir)
     except (pdfium.PdfiumError, OSError, ValueError) as exc:
         _warn(number, f"placeholder emitted (render failed: {exc})")
         return f"<!-- page {number}: scanned; render failed: {_safe(exc)} -->"
+    image = page.image
     if media is not None:
         path, link = media.save_scan(image, number)
     else:
@@ -102,11 +185,14 @@ def _page_block(
         image.save(path)
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
 
-    plan = _plan(regions, size) if regions is not None else None
+    plan = None
+    if options.layout:
+        regions = _regions(page, number)
+        plan = _plan(regions, image.size) if regions is not None else None
     if plan is not None:
-        masked = _masked(image, plan, size)
+        masked = _masked(image, plan, page.dpi)
         if media is not None:
-            _save_debug(media, number, image, masked, plan, size)
+            _save_debug(media, number, page, masked, plan)
 
     if options.client is None:
         return _failure(number, "vision_off", "", link)
@@ -115,48 +201,67 @@ def _page_block(
     crops = [(use, r) for r, use in plan or [] if use.startswith(("figure ", "table "))]
     try:
         if plan is None:
-            sections = _vision(path, sha, number, options)
+            sections = _vision(path, number, options)
         else:
-            page_path = tmp / f"scan-{number:03d}-masked.png"
-            masked.save(page_path)
-            page_sha = hashlib.sha256(page_path.read_bytes()).hexdigest()
-            sections = _vision(
-                page_path, page_sha, number, options, mode="page_layout", markers=bool(crops), cache_dir=path.parent
-            )
+            sections = _page_text(masked, plan, number, options, tmp, path.parent, markers=bool(crops))
     except VisionError as exc:
         return _failure(number, "vision_error", str(exc), link)
     body = sections.pop(_TEXT, "").strip()
     if crops:
-        body = _merge(body, _crop_parts(pdf, number, crops, size, media, tmp, options))
+        body = _merge(body, _crop_parts(page, number, crops, media, tmp, options))
     if not (body or sections):
         return _failure(number, "vision_empty", "", link)
     _warn(number, "rendered + heron + vision" if plan is not None else "rendered + vision")
     return _block(number, sha, body, sections, link, getattr(options.client, "model", None), plan is not None)
 
 
-def _vision(
-    path: Path,
-    sha: str,
-    number: int,
-    options: ScanOptions,
-    *,
-    kind: str = "text_scan",
-    mode: str = "page_extract",
-    markers: bool = False,
-    cache_dir: Path | None = None,
+def _page_text(
+    masked: Any, plan: list[tuple[Region, str]], number: int, options: ScanOptions, tmp: Path, cache_dir: Path,
+    *, markers: bool,
 ) -> dict[str, str]:
-    from ingest_parse.vision.cache import VisionCache
-    from ingest_parse.vision.enrich import image_payload
-    from ingest_parse.vision.prompts import build_page_prompt, parse_sections
+    """Текст закрашенной страницы; высокая страница — полосами, разрезы только между областями Heron."""
+    bands = _bands(masked, plan, options.max_long_edge)
+    texts: list[str] = []
+    sections: dict[str, str] = {}
+    for i, (top, bottom) in enumerate(bands, 1):
+        path = tmp / f"scan-{number:03d}-band-{i}.png"
+        masked.crop((0, top, masked.width, bottom)).save(path)
+        part = (i, len(bands)) if len(bands) > 1 else None
+        mode = "page_layout" if part is None else "page_band"
+        got = _vision(path, number, options, mode=mode, markers=markers, part=part, cache_dir=cache_dir)
+        texts.append(got.pop(_TEXT, "").strip())
+        for key, value in got.items():
+            sections.setdefault(key, value)
+    sections[_TEXT] = "\n\n".join(t for t in texts if t)
+    return sections
 
-    model = getattr(options.client, "model", None)
-    cache = VisionCache((cache_dir or path.parent) / ".vision-cache")
-    answer = None if options.force else cache.get(sha, mode, model)
-    if answer is None:
-        prompt = build_page_prompt(kind, number, markers=markers)
-        answer = options.client.complete(prompt, image_payload(path, max_long_edge=options.max_long_edge))
-        cache.put(sha, mode, model, answer)
-    return parse_sections(answer)
+
+def _bands(image: Any, plan: list[tuple[Region, str]], max_edge: int) -> list[tuple[int, int]]:
+    height = image.height
+    if height <= _BAND_FACTOR * max_edge:
+        return [(0, height)]
+    n = math.ceil(height / (max_edge * 1.1))
+    busy = sorted((int(r.box[1]), int(r.box[3])) for r, _ in plan)
+    merged: list[list[int]] = []
+    for top, bottom in busy:
+        if merged and top <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], bottom)
+        else:
+            merged.append([top, bottom])
+    gaps = [(a[1] + b[0]) // 2 for a, b in zip(merged, merged[1:], strict=False) if b[0] - a[1] > 4]
+    gray = np.asarray(image.convert("L"), dtype=np.uint8)
+    blank = np.flatnonzero((gray < 128).sum(axis=1) < max(2, 0.002 * image.width))
+    cuts = [0]
+    for k in range(1, n):
+        target, window = height * k / n, 0.2 * height
+        options = [y for y in gaps if abs(y - target) <= window and not any(t < y < b for t, b in merged)]
+        options = options or [int(y) for y in blank if abs(y - target) <= window and not any(t < y < b for t, b in merged)]
+        if options:
+            cut = min(options, key=lambda y: abs(y - target))
+            if cut - cuts[-1] > 0.15 * height:
+                cuts.append(cut)
+    cuts.append(height)
+    return list(zip(cuts, cuts[1:], strict=False))
 
 
 # --- Heron: отбор областей, отладка, вырезы, слияние ---
@@ -181,12 +286,14 @@ def _plan(regions: list[Region], size: tuple[float, float]) -> list[tuple[Region
     for r in sorted(regions, key=lambda r: (r.box[1], r.box[0])):
         role = _ROLE.get(r.label)
         if r.label in _MASKED:
-            use = "masked"
+            # колонтитул внутри другой области (форма, итоги) — это содержимое, не номер страницы
+            inner = any(o is not r and o.label not in _MASKED and _inside(r.box, o.box) >= 0.5 for o in regions)
+            use = "text" if inner else "masked"
         elif role is None:
             use = "text"
         elif r.confidence < _MIN_CONFIDENCE:
             use = "skipped: low confidence"
-        elif _area(r.box) >= _PAGE_SHARE * page:
+        elif role == "figure" and _area(r.box) >= _PAGE_SHARE * page:
             use = "skipped: page-sized"
         elif any(_inside(r.box, t.box) >= _INSIDE_SHARE for t in taken):
             use = "skipped: inside another region"
@@ -198,14 +305,9 @@ def _plan(regions: list[Region], size: tuple[float, float]) -> list[tuple[Region
     return plan
 
 
-def _px(box: tuple[float, float, float, float], scale: float, limit: tuple[int, int], pad: float) -> tuple[int, ...]:
+def _px(box: tuple[float, float, float, float], limit: tuple[int, int], pad: float) -> tuple[int, int, int, int]:
     l, t, r, b = box
-    return (
-        max(0, int((l - pad) * scale)),
-        max(0, int((t - pad) * scale)),
-        min(limit[0], int((r + pad) * scale + 0.5)),
-        min(limit[1], int((b + pad) * scale + 0.5)),
-    )
+    return (max(0, int(l - pad)), max(0, int(t - pad)), min(limit[0], int(r + pad + 0.5)), min(limit[1], int(b + pad + 0.5)))
 
 
 def _font(size: int) -> Any:
@@ -215,15 +317,14 @@ def _font(size: int) -> Any:
         return ImageFont.load_default()
 
 
-def _masked(image: Any, plan: list[tuple[Region, str]], size: tuple[float, float]) -> Any:
+def _masked(image: Any, plan: list[tuple[Region, str]], dpi: float) -> Any:
     """Копия страницы для VLM: колонтитулы, рисунки и таблицы закрашены; на рисунках и таблицах — метка."""
     out = image.copy()
     draw = ImageDraw.Draw(out)
-    scale = image.width / size[0]
     for r, use in plan:
         if use != "masked" and not use.startswith(("figure ", "table ")):
             continue
-        box = _px(r.box, scale, image.size, 1.0)
+        box = _px(r.box, image.size, dpi / 72)
         draw.rectangle(box, fill="white")
         if use != "masked":
             role, k = use.split()
@@ -232,61 +333,58 @@ def _masked(image: Any, plan: list[tuple[Region, str]], size: tuple[float, float
                 f"[{role.upper()} {k}]",
                 fill="black",
                 anchor="mm",
-                font=_font(max(20, min(64, (box[3] - box[1]) // 3))),
+                font=_font(max(24, min(96, (box[3] - box[1]) // 3))),
             )
     return out
 
 
-def _save_debug(
-    media: MediaWriter, number: int, image: Any, masked: Any, plan: list[tuple[Region, str]], size: tuple[float, float]
-) -> None:
+def _save_debug(media: MediaWriter, number: int, page: _Page, masked: Any, plan: list[tuple[Region, str]]) -> None:
     """media/debug/: рамки Heron, JSON областей и то, что увидит VLM."""
-    boxes = image.copy()
+    boxes = page.image.convert("RGB")
     draw = ImageDraw.Draw(boxes)
-    scale = image.width / size[0]
-    font = _font(20)
+    font = _font(28)
     for r, use in plan:
         color = _COLOR.get(use.split()[0], "orange")
-        box = _px(r.box, scale, image.size, 0.0)
-        draw.rectangle(box, outline=color, width=3)
-        draw.text((box[0] + 4, max(0, box[1] - 22)), f"{r.label} {r.confidence:.2f} → {use}", fill=color, font=font)
+        box = _px(r.box, boxes.size, 0.0)
+        draw.rectangle(box, outline=color, width=4)
+        draw.text((box[0] + 4, max(0, box[1] - 30)), f"{r.label} {r.confidence:.2f} → {use}", fill=color, font=font)
     stem = f"debug/scan-{number:03d}"
     media.save_named(boxes, f"{stem}-heron.png")
     media.save_named(masked, f"{stem}-masked.png")
     data = {
         "page": number,
-        "size_pt": [round(size[0], 1), round(size[1], 1)],
+        "dpi": round(page.dpi),
+        "preprocess": page.steps,
+        "size_px": list(page.image.size),
         "regions": [
-            {"label": r.label, "confidence": round(r.confidence, 3), "box_pt": [round(v, 1) for v in r.box], "use": use}
+            {"label": r.label, "confidence": round(r.confidence, 3), "box_px": [round(v) for v in r.box], "use": use}
             for r, use in plan
         ],
     }
     (media.directory / f"{stem}-heron.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _save(image: Any, name: str, media: MediaWriter | None, tmp: Path) -> tuple[Path, str | None]:
+    if media is not None:
+        return media.save_named(image, name)
+    image.save(tmp / name)
+    return tmp / name, None
+
+
 def _crop_parts(
-    pdf: Any,
-    number: int,
-    crops: list[tuple[str, Region]],
-    size: tuple[float, float],
-    media: MediaWriter | None,
-    tmp: Path,
-    options: ScanOptions,
+    page: _Page, number: int, crops: list[tuple[str, Region]], media: MediaWriter | None, tmp: Path, options: ScanOptions
 ) -> dict[str, str]:
-    """{"TABLE 1": Markdown-таблица, "FIGURE 1": vision-блок + ссылка}; вырезы — с рендера ×4."""
-    hires, _ = _render(pdf, number, _CROP_SCALE)
+    """{"TABLE 1": Markdown-таблица, "FIGURE 1": vision-блок + ссылка}; вырезы — с выровненной страницы."""
     parts = {}
+    pad = _PAD_PT * page.dpi / 72
     for use, r in crops:
         role, k = use.split()
-        name = f"scan-{number:03d}-{'fig' if role == 'figure' else 'table'}-{k}.png"
-        crop = hires.crop(_px(r.box, hires.width / size[0], hires.size, _PAD))
-        if media is not None:
-            path, link = media.save_named(crop, name)
+        box = _px(r.box, page.image.size, pad)
+        if role == "figure":
+            path, link = _save(page.image.crop(box), f"scan-{number:03d}-fig-{k}.png", media, tmp)
+            parts[f"FIGURE {k}"] = _figure(path, link, int(k), number, options)
         else:
-            path, link = tmp / name, None
-            crop.save(path)
-        make = _figure if role == "figure" else _table
-        parts[f"{role.upper()} {k}"] = make(path, link, int(k), number, options)
+            parts[f"TABLE {k}"] = _table(page, box, int(k), number, media, tmp, options)
     return parts
 
 
@@ -298,18 +396,53 @@ def _figure(path: Path, link: str | None, k: int, number: int, options: ScanOpti
     return f"{block}\n\n{image_markdown(alt, link)}" if link is not None else block
 
 
-def _table(path: Path, link: str | None, k: int, number: int, options: ScanOptions) -> str:
+def _is_table(text: str) -> bool:
+    return sum(line.lstrip().startswith("|") for line in text.splitlines()) >= 2
+
+
+def _table(
+    page: _Page, box: tuple[int, int, int, int], k: int, number: int, media: MediaWriter | None, tmp: Path,
+    options: ScanOptions,
+) -> str:
+    """Таблица: ≤ 10 строк — один вырез; длиннее — куски по строкам, у каждого сверху шапка таблицы."""
+    from ingest_parse.ttn.zones import table_chunks, table_zones
     from ingest_parse.vision import VisionError
 
-    sha = hashlib.sha256(path.read_bytes()).hexdigest()
-    try:
-        text = _vision(path, sha, number, options, kind="table_scan", mode="table_extract").get(_TEXT, "").strip()
-    except VisionError:
-        text = ""
-    if sum(line.lstrip().startswith("|") for line in text.splitlines()) >= 2:
-        return text
+    zones = table_zones(page.image, box)
+    tall = len(zones.rows) > _MAX_ROWS or (not zones.rows and box[3] - box[1] > _TILE_HEIGHT)
+    pieces = [c.image for c in table_chunks(page.image, zones, _MAX_ROWS)] if tall else [page.image.crop(box)]
     alt = f"Таблица {k}, страница {number}"
-    return image_markdown(alt, link) if link is not None else f"<!-- {alt}: not extracted -->"
+    texts, misses = [], []
+    for j, piece in enumerate(pieces, 1):
+        name = f"scan-{number:03d}-table-{k}.png" if len(pieces) == 1 else f"scan-{number:03d}-table-{k}-{j}.png"
+        path, link = _save(piece, name, media, tmp)
+        kind, mode = ("table_scan", "table_extract") if len(pieces) == 1 else ("table_tile", "table_tile")
+        try:
+            text = _vision(path, number, options, kind=kind, mode=mode).get(_TEXT, "").strip()
+        except VisionError:
+            text = ""
+        if _is_table(text):
+            texts.append(text)
+        else:
+            label = alt if len(pieces) == 1 else f"{alt}, часть {j}"
+            misses.append(image_markdown(label, link) if link is not None else f"<!-- {label}: not extracted -->")
+    out = [_join_tables(texts)] if texts else []
+    return "\n\n".join(out + misses)
+
+
+def _join_tables(texts: list[str]) -> str:
+    """Куски одной таблицы → одна: шапка — только из первого куска; повтор строки на стыке убирается."""
+    lines: list[str] = []
+    for i, text in enumerate(texts):
+        rows = text.strip().splitlines()
+        if i:
+            sep = next((n for n, row in enumerate(rows[:4]) if _SEPARATOR.match(row)), None)
+            if sep is not None:
+                rows = rows[sep + 1 :]
+        for row in rows:
+            if not (lines and row.strip() == lines[-1].strip()):
+                lines.append(row)
+    return "\n".join(lines)
 
 
 def _merge(body: str, parts: dict[str, str]) -> str:

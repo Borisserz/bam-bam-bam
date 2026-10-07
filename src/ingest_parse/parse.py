@@ -119,19 +119,22 @@ def parse_to_markdown(
     vision_force: bool = False,
     links_base: str | Path | None = None,
     scan_layout: bool = False,
+    scan_preprocess: bool = True,
 ) -> str:
     """parse_document + media_link: префикс ссылок на картинки (CLI — относительно out.md).
 
     links_base: папка, от которой считаются ссылки на картинки (для vision; по умолчанию cwd).
+    scan_preprocess: страницы-сканы — родной dpi, поворот, наклон, свет, шум (False — простой рендер ×2).
     """
     if not (vision or vision_force):
-        return _parse_source(source, filename, media_dir, media_link, ScanOptions(layout=scan_layout))
+        scan = ScanOptions(layout=scan_layout, preprocess=scan_preprocess)
+        return _parse_source(source, filename, media_dir, media_link, scan)
 
     from ingest_parse.vision import VisionClient, VisionConfig, enrich_markdown
 
     config = VisionConfig.from_env()  # без адреса API — ошибка до разбора
     client = VisionClient(config)
-    scan = ScanOptions(client, vision_force, config.max_long_edge, scan_layout)
+    scan = ScanOptions(client, vision_force, config.max_long_edge, scan_layout, scan_preprocess)
     md = _parse_source(source, filename, media_dir, media_link, scan)
     return enrich_markdown(
         md,
