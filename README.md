@@ -306,6 +306,100 @@ uv run ingest-parse report.docx -o out\report.md --vision
   с кодом 0; при следующем `--vision` такие блоки переспрашиваются;
 - без `VISION_API_BASE_URL` → `--vision` сразу завершается с кодом 2, разбор не начинается.
 
+## Windows: все команды подряд
+
+PowerShell, из папки проекта. Первые два блока — один раз на ПК.
+
+**1. Установка**
+
+```powershell
+winget install --id=astral-sh.uv -e
+winget install TheDocumentFoundation.LibreOffice          # нужен для .doc / .rtf и схем в .docx
+git clone https://github.com/Borisserz/bam-bam-bam.git    # репозиторий приватный — git попросит вход в GitHub
+cd bam-bam-bam
+uv sync                                                   # ~1 ГБ: Docling, torch CPU, OpenCV, pypdfium2
+uv run python -c "import docling, torch, cv2, pypdfium2; print('deps ok')"
+```
+
+Обновить код: `git pull` и `uv sync`.
+
+**2. Модели для PDF** — скачиваются сами при первом разборе PDF (~0,5 ГБ, HuggingFace), дальше офлайн:
+
+```powershell
+uv run ingest-parse report.pdf -o out\report.md
+dir $env:USERPROFILE\.cache\huggingface\hub | findstr docling   # docling-layout-heron, docling-models
+```
+
+Если `huggingface.co` закрыт — скопируйте папки `models--docling-project--*` с другой машины в
+`%USERPROFILE%\.cache\huggingface\hub\`.
+
+**3. Один документ**
+
+```powershell
+uv run ingest-parse report.docx -o out\report.md          # .docx / .docm / .doc / .rtf / .txt / .pdf
+uv run ingest-parse report.pdf  -o out\report.md          # картинки → out\media\report\
+uv run ingest-parse report.docx > out\report.md           # Markdown в stdout, без картинок
+uv run ingest-parse report.docx -o out\report.md --media-dir D:\m
+```
+
+**4. Модель (VLM): сканы PDF и описания картинок**
+
+```powershell
+curl.exe http://localhost:8080/v1/models                  # сервер модели жив?
+$env:VISION_API_BASE_URL = "http://localhost:8080"        # на ПК с моделью
+# $env:VISION_API_BASE_URL = "http://192.168.4.101:8080"  # с другой машины в LAN
+uv run ingest-parse scan.pdf -o out\scan.md --vision      # сканы → текст, картинки → описания
+uv run ingest-parse scan.pdf -o out\scan.md --vision-force  # мимо кэша .vision-cache
+```
+
+**5. Вся папка**
+
+```powershell
+Get-ChildItem examples\input -File | Where-Object Name -notlike ".*" | ForEach-Object {
+    uv run ingest-parse $_.FullName -o "out\$($_.Name).md"            # добавьте --vision для сканов
+}
+```
+
+`examples\output` — эталоны для тестов; пишите в `out\`, чтобы их не перезаписать.
+
+**6. Проверить скан: наш пайплайн и «чистый» Docling/Heron**
+
+```powershell
+# сделать скан из любого PDF: первые 3 страницы → картинки без текстового слоя
+@'
+import pypdfium2 as pdfium
+pdf = pdfium.PdfDocument("report.pdf")
+pages = [pdf[i].render(scale=150/72).to_pil().convert("RGB") for i in range(min(3, len(pdf)))]
+pages[0].save("scan.pdf", save_all=True, append_images=pages[1:], resolution=150)
+'@ | uv run python -
+
+uv run ingest-parse scan.pdf -o out\scan.md               # без модели: заглушки reason="vision_off" + scan-NNN.png
+uv run ingest-parse scan.pdf -o out\scan_vision.md --vision   # через модель: текст страниц
+uv run python scripts\heron_raw.py scan.pdf out\heron     # что нашёл Heron: регионы в консоли,
+                                                          # out\heron\page-NNN-heron.png с рамками, docling.md
+```
+
+На скане без текстового слоя Docling оставляет только регионы-картинки (`<!-- image -->`), текст теряется —
+поэтому наш пайплайн отправляет такие страницы в VLM.
+
+**7. Тесты** (нужны `tests/` и `examples/` из zip; в GitHub их нет)
+
+```powershell
+uv run pytest -q
+uv run pytest -q tests\test_pdf.py                        # только PDF
+```
+
+**8. Если что-то не так**
+
+| Симптом | Что сделать |
+|---|---|
+| `LibreOfficeNotFoundError` | `$env:LIBREOFFICE_PATH = "D:\Apps\LibreOffice\program\soffice.exe"` |
+| ошибка загрузки с `huggingface.co` | скопировать кэш моделей (блок 2) |
+| `No module named cv2` | `uv sync --reinstall-package opencv-python-headless` |
+| `error: Vision API is not configured`, код 2 | задать `VISION_API_BASE_URL` (блок 4) |
+| `reason="vision_error"` в блоке скана | `curl.exe http://localhost:8080/v1/models`, перезапустить с `--vision` |
+| кракозябры в консоли | писать в файл через `-o`, stdout всегда UTF-8 |
+
 ## Не делает (осознанно)
 
 - OCR (Tesseract, RapidOCR, `do_ocr` Docling) — сканы читает только VLM; ColPali (поиск по картинкам страниц —
@@ -321,10 +415,13 @@ uv run ingest-parse report.docx -o out\report.md --vision
 `examples/input/` и `examples/output/` в репозитории пустые: положите свои документы в `input/` и запустите
 
 ```powershell
-python -m uv run ingest-parse examples\input\report.docx -o examples\output\report.md
+uv run ingest-parse examples\input\report.docx -o examples\output\report.md
 ```
+
+Все команды для Windows — в разделе [Windows: все команды подряд](#windows-все-команды-подряд).
 
 ## Лицензии
 
 Docling / docling-slim — MIT; модели Docling — Apache-2.0 / CDLA; torch — BSD-3; OpenCV — Apache-2.0;
-pylatexenc — MIT; pypdfium2 — Apache-2.0 / BSD-3; Pillow — MIT-CMU;LibreOffice — внешняя программа (MPL), в пакет не входит. PyMuPDF (AGPL) не используется и не должен добавляться.
+pylatexenc — MIT; pypdfium2 — Apache-2.0 / BSD-3; Pillow — MIT-CMU;
+LibreOffice — внешняя программа (MPL), в пакет не входит. PyMuPDF (AGPL) не используется и не должен добавляться.
