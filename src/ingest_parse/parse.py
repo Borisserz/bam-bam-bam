@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import codecs
 import functools
+import os
 import re
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from ingest_parse.convert_doc import convert_doc_to_docx, docm_to_docx, docx_to_pdf, find_soffice
+from ingest_parse.convert_doc import (
+    convert_doc_to_docx,
+    docm_to_docx,
+    docx_to_pdf,
+    find_soffice,
+)
 from ingest_parse.detect import detect_format
 from ingest_parse.markdown import docling_to_markdown
 from ingest_parse.media import MediaWriter
@@ -20,6 +26,7 @@ from ingest_parse.prepare import prepare_docx
 from ingest_parse.shapes import mark_shapes, render_pages
 
 _BLANK_LINE = re.compile(r"\n[ \t]*\n")
+DOTS_MODEL = "mlx-community/dots.mocr-8bit"  # имя модели на сервере dots; другое — через SCAN_DOTS_MODEL
 
 
 def _decode_txt(raw: bytes) -> str:
@@ -126,15 +133,16 @@ def parse_to_markdown(
     links_base: папка, от которой считаются ссылки на картинки (для vision; по умолчанию cwd).
     scan_preprocess: страницы-сканы — родной dpi, поворот, наклон, свет, шум (False — простой рендер ×2).
     """
+    dots = _dots_sender() if scan_layout else None
     if not (vision or vision_force):
-        scan = ScanOptions(layout=scan_layout, preprocess=scan_preprocess)
+        scan = ScanOptions(layout=scan_layout, preprocess=scan_preprocess, dots=dots)
         return _parse_source(source, filename, media_dir, media_link, scan)
 
     from ingest_parse.vision import VisionClient, VisionConfig, enrich_markdown
 
     config = VisionConfig.from_env()  # без адреса API — ошибка до разбора
     client = VisionClient(config)
-    scan = ScanOptions(client, vision_force, config.max_long_edge, scan_layout, scan_preprocess)
+    scan = ScanOptions(client, vision_force, config.max_long_edge, scan_layout, scan_preprocess, dots)
     md = _parse_source(source, filename, media_dir, media_link, scan)
     return enrich_markdown(
         md,
@@ -143,6 +151,16 @@ def parse_to_markdown(
         force=vision_force,
         max_long_edge=config.max_long_edge,
     )
+
+
+def _dots_sender() -> Any:
+    """SCAN_DOTS_URL (+ SCAN_DOTS_MODEL) — сервер dots.mocr для разметки сканов; не задан — только Heron и линии."""
+    url = os.environ.get("SCAN_DOTS_URL", "").strip()
+    if not url:
+        return None
+    from ingest_parse.ttn import dots
+
+    return dots.http_sender(url, os.environ.get("SCAN_DOTS_MODEL", "").strip() or DOTS_MODEL)
 
 
 def _parse_source(

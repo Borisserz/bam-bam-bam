@@ -53,8 +53,9 @@ class ScanOptions:
     client: Any = None  # VisionClient; None — без --vision в сеть не ходим
     force: bool = False
     max_long_edge: int = 2048
-    layout: bool = False  # Heron на страницах-сканах
+    layout: bool = False  # разметка страниц-сканов: Heron (плитки) + сетка линий (+ dots)
     preprocess: bool = True  # поворот, наклон, свет, шум; False — простой рендер ×2
+    dots: Any = None  # ttn.dots.Send — второй источник разметки; None — только Heron и линии
 
 
 @dataclass
@@ -160,14 +161,31 @@ def _load(pdf: Any, number: int, options: ScanOptions, work: Path, cache_dir: Pa
     return _Page(prep.image, prep.dpi, prep.steps)
 
 
-def _regions(page: _Page, number: int) -> list[Region] | None:
-    from ingest_parse.ttn.zones import heron_regions
+def _regions(page: _Page, number: int, options: ScanOptions) -> list[Region] | None:
+    """Итоговая разметка: Heron (страница + половины), dots (если есть), сетка линий бланка, добор чернил."""
+    from ingest_parse.ttn.layout import fuse, heron_layout, ruled_tables
 
     try:
-        return [Region(label, conf, box) for label, conf, box in heron_regions(page.image, page.dpi)]
+        heron = heron_layout(page.image)
     except Exception as exc:  # модель не скачана, сбой Docling — страница идёт без раскладки
         warnings.warn(f"heron layout failed: {exc}; page {number} goes without layout", PdfPageWarning, stacklevel=4)
         return None
+    dots = []
+    if options.dots is not None:
+        from ingest_parse.ttn.dots import dots_layout
+
+        try:
+            dots, _ = dots_layout(page.image, options.dots)
+        except Exception as exc:  # сервер dots недоступен — хватит Heron и линий
+            warnings.warn(f"dots layout failed: {exc}; page {number} uses heron + lines", PdfPageWarning, stacklevel=4)
+    gray = np.asarray(page.image.convert("L"), dtype=np.uint8)
+    return [Region(_label(d), d.score, d.box) for d in fuse(page.image.size, heron, dots, ruled_tables(gray), gray)]
+
+
+def _label(d: Any) -> str:
+    if d.role in ("table", "picture"):
+        return d.role
+    return d.label.lower().replace("-", "_") if d.label else "text"
 
 
 def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, options: ScanOptions) -> str:
@@ -187,7 +205,7 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
 
     plan = None
     if options.layout:
-        regions = _regions(page, number)
+        regions = _regions(page, number, options)
         plan = _plan(regions, image.size) if regions is not None else None
     if plan is not None:
         masked = _masked(image, plan, page.dpi)
