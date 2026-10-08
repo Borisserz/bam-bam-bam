@@ -20,6 +20,12 @@ def _inputs(paths: list[Path]) -> list[Path]:
     return files
 
 
+def _progress(report) -> None:
+    where = f"waybill {report.doc}" if report.doc else "not a waybill"
+    extra = f"; ERROR {report.error}" if report.error else (f"; copy of page {report.copy_of}" if report.copy_of else "")
+    print(f"  page {report.number}: {report.kind}, {where}; zones {report.zones}{extra}", flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="ingest-ttn", description="ТН-2 / ТТН-1 (Беларусь): PDF-скан → JSON + Markdown.")
     p.add_argument("paths", type=Path, nargs="+", help="PDF files or folders (recursively)")
@@ -59,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         denoise=not args.no_denoise,
         heron=not args.no_heron,
         debug=args.debug,
+        on_page=_progress,
     )
 
     files = _inputs(args.paths)
@@ -86,7 +93,9 @@ def main(argv: list[str] | None = None) -> int:
         (stem.parent / f"{path.stem}.ttn.md").write_text(render(result), encoding="utf-8", newline="\n")
         errors = sum(i.level == "error" for i in result.issues)
         status = "no vision" if not result.vision else ("OK" if result.ok else f"CHECK: {errors} errors")
-        print(f"{path.name}: {status}; items={len(result.waybill.items)}; vlm calls={result.calls} → {stem}.ttn.md")
+        items = sum(len(d.waybill.items) for d in result.docs)
+        print(f"{path.name}: {status}; waybills={len(result.docs)}; items={items}; pages={len(result.pages)}; "
+              f"vlm calls={result.calls} → {stem}.ttn.md", flush=True)
     return 1 if failed else 0
 
 

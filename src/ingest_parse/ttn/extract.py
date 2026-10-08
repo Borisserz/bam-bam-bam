@@ -61,6 +61,7 @@ class TtnOptions:
     denoise: bool = True
     heron: bool = True
     debug: bool = False  # кроме разметки страницы сохранять предобработку, зоны и вырезы для VLM
+    on_page: Any = None  # callable(PageReport) после каждой страницы — прогресс в консоли
 
 
 @dataclass
@@ -74,30 +75,61 @@ class PageReport:
     rows: int
     chunks: int
     images: dict[str, str] = field(default_factory=dict)  # подпись → путь относительно out_dir
+    doc: int | None = None  # номер накладной в файле (с 1); None — страница не из накладной
+    markdown: str | None = None  # страница целиком (оборот, письмо): то, что прочитала модель
+    error: str | None = None  # сбой обработки страницы
+    copy_of: int | None = None  # те же строки товаров, что на этой странице накладной — в накладную не добавлены
+
+
+@dataclass
+class TtnDoc:
+    """Одна накладная из пачки: лицевая страница и её продолжения."""
+
+    waybill: Waybill = field(default_factory=Waybill)
+    pages: list[int] = field(default_factory=list)
+    issues: list[Issue] = field(default_factory=list)
+    repaired: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not any(i.level == "error" for i in self.issues)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"pages": self.pages, "status": "ok" if self.ok else "check", "waybill": self.waybill.to_dict(),
+                "issues": [asdict(i) for i in self.issues], "repaired": self.repaired}
 
 
 @dataclass
 class TtnResult:
     source: Path
-    waybill: Waybill
-    issues: list[Issue]
+    docs: list[TtnDoc]
     pages: list[PageReport]
     vision: bool
     calls: int = 0
-    repaired: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)  # сбои VLM
 
     @property
+    def waybill(self) -> Waybill:
+        return self.docs[0].waybill if self.docs else Waybill()
+
+    @property
+    def issues(self) -> list[Issue]:
+        return [i for d in self.docs for i in d.issues]
+
+    @property
+    def repaired(self) -> list[str]:
+        return [r for d in self.docs for r in d.repaired]
+
+    @property
     def ok(self) -> bool:
-        return self.vision and not any(i.level == "error" for i in self.issues) and not self.errors
+        return (self.vision and all(d.ok for d in self.docs) and not self.errors
+                and not any(p.error for p in self.pages))
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "source": str(self.source),
             "status": "ok" if self.ok else ("no_vision" if not self.vision else "check"),
-            "waybill": self.waybill.to_dict(),
-            "issues": [asdict(i) for i in self.issues],
-            "repaired": self.repaired,
+            "documents": [d.to_dict() for d in self.docs],
             "vision_errors": self.errors,
             "vision_calls": self.calls,
             "pages": [asdict(p) for p in self.pages],
@@ -142,6 +174,18 @@ class _Asker:
             answer = self.options.client.complete(prompt, image_payload(path, max_long_edge=self.options.max_long_edge))
             self.cache.put(sha, mode, model, answer)
         return answer
+
+    def text(self, image: Image.Image, prompt: str, name: str) -> str | None:
+        """Ответ модели как есть (Markdown страницы), без разбора JSON."""
+        from ingest_parse.vision import VisionError
+
+        path = self.work / f"{name}.png"
+        image.save(path)
+        try:
+            return self._complete(path, prompt, hashlib.sha256(path.read_bytes()).hexdigest())
+        except VisionError as exc:
+            self.errors.append(f"{name}: {exc}")
+            return None
 
     def ask(self, image: Image.Image, prompt: str, name: str) -> dict[str, Any] | None:
         from ingest_parse.vision import VisionError
@@ -235,63 +279,89 @@ def _same(a: Item, b: Item) -> bool:
     return (a.n, a.name, a.cost, a.quantity) == (b.n, b.name, b.cost, b.quantity) and a.name is not None
 
 
+@dataclass
+class _Open:
+    """Накладная, которую сейчас собираем: строки со ссылками на вырезы и данные низа страниц."""
+
+    doc: TtnDoc
+    refs: list[_RowRef] = field(default_factory=list)
+    footer: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def started(self) -> bool:
+        return bool(self.doc.waybill.number or self.doc.waybill.items)
+
+
+def _fenced(text: str) -> str:
+    return re.sub(r"^```[\w-]*\n|\n?```$", "", text.strip()).strip()
+
+
 def extract_ttn(path: Path, out_dir: Path, options: TtnOptions) -> TtnResult:
-    """PDF накладной → TtnResult; картинки отладки — в out_dir/<имя>/."""
+    """PDF с одной или пачкой накладных → TtnResult: накладные по лицевым страницам, отчёт по каждой странице;
+    картинки — в out_dir/<имя>/."""
     work = out_dir / path.stem
     work.mkdir(parents=True, exist_ok=True)
     asker = _Asker(options, work) if options.client is not None else None
-    waybill = Waybill()
     pages: list[PageReport] = []
     contexts: dict[int, _Context] = {}
-    refs: list[_RowRef] = []
-    footer_data: dict[str, Any] = {}
+    opened: list[_Open] = []
 
     def rel(p: Path) -> str:
         return p.relative_to(out_dir).as_posix()
 
-    for page in rasterize(path):
+    def process(page: Any, report: PageReport) -> None:
         n = page.number
         tag = f"page-{n:02d}"
         check = _orient(asker, f"{tag}-orientation") if options.orientation and asker is not None else None
         prep = prepare(page.image, page.dpi, orient=check, denoise=options.denoise)
         image = prep.image
+        report.dpi, report.steps = prep.dpi, prep.steps
         try:
             regions = ttn_layout(image, prep.stamps, heron=options.heron)
         except Exception as exc:  # noqa: BLE001 — модель раскладки не скачана / сбой Docling
             warnings.warn(f"{path.name} page {n}: heron failed ({exc}); using ruled lines", TtnWarning, stacklevel=2)
             regions = ttn_layout(image, prep.stamps, heron=False)
+        draw_layout(image, regions).save(work / f"{tag}-layout.png")
+        report.images = {"разметка страницы": rel(work / f"{tag}-layout.png")}
         zones = find_zones(image, regions)
         contexts[n] = _Context(image, zones, page.text)
         chunks = table_chunks(image, zones)
-        report = PageReport(n, "front" if n == 1 else "continuation", prep.dpi, page.native_dpi, prep.steps,
-                            zones.source, len(zones.rows), len(chunks))
-        draw_layout(image, regions).save(work / f"{tag}-layout.png")
-        report.images = {"разметка страницы": rel(work / f"{tag}-layout.png")}
+        report.zones, report.rows, report.chunks = zones.source, len(zones.rows), len(chunks)
         if options.debug:
             image.save(work / f"{tag}-prepared.png")
             draw_zones(image, zones).save(work / f"{tag}-zones.png")
             report.images |= {"страница после предобработки": rel(work / f"{tag}-prepared.png"),
                               "зоны и строки": rel(work / f"{tag}-zones.png")}
-        pages.append(report)
         if asker is None:
             if not options.debug:
-                continue
+                return
             for k, chunk in enumerate(chunks, 1):
                 chunk.image.save(work / f"{tag}-table-{k}.png")
             _crop(image, zones.header).save(work / f"{tag}-header.png")
             strip = fields_image(image, form_fields(regions, zones.header, image.width))
             if strip is not None:
                 strip.save(work / f"{tag}-header-fields.png")
-            continue
+            return
 
         header = asker.ask(_crop(image, zones.header), prompts.with_text_layer(prompts.HEADER.format(page=n), page.text), f"{tag}-header")
-        report.kind = _page_kind(header, report.kind)
-        if report.kind == "back":
-            continue
+        report.kind = _page_kind(header, "continuation" if opened else "front")
+        if report.kind == "back" or (report.kind == "other" and zones.source != "layout"):
+            # оборот, письмо, акт — не товарный раздел: страница целиком в Markdown
+            answer = asker.text(image, prompts.with_text_layer(prompts.PAGE.format(page=n), page.text), f"{tag}-page")
+            report.markdown = _fenced(answer) if answer else None
+            report.doc = len(opened) if report.kind == "back" and opened else None
+            return
+        if not opened or (report.kind == "front" and opened[-1].started):
+            opened.append(_Open(TtnDoc()))
+        cur = opened[-1]
+        waybill = cur.doc.waybill
+        cur.doc.pages.append(n)
+        report.doc = len(opened)
         if header and report.kind == "front":
             _merge_header(waybill, header)
             if not (waybill.shipper.name and waybill.consignee.name):
                 _read_fields(asker, image, regions, zones, n, waybill, report, work, rel)
+        found: list[tuple[Item, _RowRef]] = []
         for k, chunk in enumerate(chunks, 1):
             prompt = prompts.ITEMS.format(page=n) + prompts.grid_hint(len(zones.columns) - 1)
             data = asker.ask(chunk.image, prompts.with_text_layer(prompt, page.text), f"{tag}-table-{k}")
@@ -301,29 +371,49 @@ def extract_ttn(path: Path, out_dir: Path, options: TtnOptions) -> TtnResult:
                 if item.name and _TOTAL_ROW.match(item.name):
                     _merge_totals(waybill.totals, row)
                     continue
-                if waybill.items and _same(waybill.items[-1], item):
+                if found and _same(found[-1][0], item):
                     continue  # перекрытие кусков без линий
                 band = chunk.rows[j : j + 1] if len(rows) == len(chunk.rows) else []
-                waybill.items.append(item)
-                refs.append(_RowRef(n, band, chunk.image))
+                found.append((item, _RowRef(n, band, chunk.image)))
             _merge_totals(waybill.totals, (data or {}).get("totals"))
+        key = [(i.name, i.quantity, i.cost) for i, _ in found]
+        report.copy_of = next((q for q in cur.doc.pages[:-1]
+                               if key and key == [(i.name, i.quantity, i.cost) for i in waybill.items if i.page == q]), None)
+        if report.copy_of is None:  # вторая копия той же страницы в пачке — строки уже есть
+            waybill.items += [i for i, _ in found]
+            cur.refs += [r for _, r in found]
         if zones.footer:
             data = asker.ask(_crop(image, zones.footer), prompts.FOOTER.format(page=n), f"{tag}-footer") or {}
             _merge_totals(waybill.totals, data.get("totals"))
-            footer_data.update({k: v for k, v in data.items() if v not in (None, "") and k != "totals"})
+            cur.footer.update({k: v for k, v in data.items() if v not in (None, "") and k != "totals"})
 
-    for key in ("vat_words", "cost_with_vat_words", "mass_words", "places_words"):
-        if footer_data.get(key):
-            setattr(waybill.totals, key, str(footer_data[key]).strip())
-    for key in ("released_by", "handed_by", "accepted_by", "power_of_attorney", "seal"):
-        if footer_data.get(key) and getattr(waybill, key) is None:
-            setattr(waybill, key, " ".join(str(footer_data[key]).split()))
+    for page in rasterize(path):
+        report = PageReport(page.number, "other", page.dpi, page.native_dpi, [], "—", 0, 0)
+        pages.append(report)
+        try:
+            process(page, report)
+        except Exception as exc:  # noqa: BLE001 — одна битая страница не роняет пачку
+            report.error = f"{type(exc).__name__}: {exc}"
+            warnings.warn(f"{path.name} page {page.number}: {report.error}", TtnWarning, stacklevel=2)
+        if options.on_page is not None:
+            options.on_page(report)
 
-    result = TtnResult(path, waybill, [], pages, asker is not None)
+    result = TtnResult(path, [o.doc for o in opened], pages, asker is not None)
+    kinds = {p.number: p.kind for p in pages}
+    for k, cur in enumerate(opened, 1):
+        waybill = cur.doc.waybill
+        for key in ("vat_words", "cost_with_vat_words", "mass_words", "places_words"):
+            if cur.footer.get(key):
+                setattr(waybill.totals, key, str(cur.footer[key]).strip())
+        for key in ("released_by", "handed_by", "accepted_by", "power_of_attorney", "seal"):
+            if cur.footer.get(key) and getattr(waybill, key) is None:
+                setattr(waybill, key, " ".join(str(cur.footer[key]).split()))
+        if asker is not None:
+            front = cur.doc.pages[0] if kinds[cur.doc.pages[0]] == "front" else None
+            _repair(cur.doc, cur.refs, contexts, asker, options, front, f"doc-{k:02d}")
+            cur.doc.issues = validate(waybill)
     if asker is not None:
-        _repair(waybill, refs, contexts, asker, options, result)
         result.calls, result.errors = asker.calls, asker.errors
-    result.issues = validate(waybill) if asker is not None else []
     return result
 
 
@@ -333,8 +423,10 @@ def _item_json(item: Item) -> str:
 
 
 def _repair(
-    w: Waybill, refs: list[_RowRef], contexts: dict[int, _Context], asker: _Asker, options: TtnOptions, result: TtnResult
+    doc: TtnDoc, refs: list[_RowRef], contexts: dict[int, _Context], asker: _Asker, options: TtnOptions,
+    front: int | None, tag: str,
 ) -> None:
+    w = doc.waybill
     for round_ in range(1, options.repair_rounds + 1):
         bad = [(i, check_item(item, i)) for i, item in enumerate(w.items)]
         bad = [(i, issues) for i, issues in bad if issues]
@@ -354,7 +446,7 @@ def _repair(
             fixed = item_from_dict(data, page=item.page)
             if not check_item(fixed, i):
                 w.items[i] = fixed
-                result.repaired.append(f"строка {item.n or i + 1}: {_item_json(item)} → {_item_json(fixed)}")
+                doc.repaired.append(f"строка {item.n or i + 1}: {_item_json(item)} → {_item_json(fixed)}")
 
     totals_issues = check_totals(w)
     if totals_issues and refs:
@@ -364,7 +456,7 @@ def _repair(
         previous = json.dumps(asdict(w.totals), ensure_ascii=False)
         for round_ in range(1, options.repair_rounds + 1):
             prompt = prompts.TOTALS_REPAIR.format(previous=previous, problem="; ".join(x.message for x in totals_issues))
-            data = asker.ask(stack(parts), prompt, f"totals-repair-{round_}")
+            data = asker.ask(stack(parts), prompt, f"{tag}-totals-repair-{round_}")
             if not data:
                 break
             trial = Totals(**asdict(w.totals))
@@ -374,20 +466,20 @@ def _repair(
                     setattr(trial, key, str(data[key]).strip())
             candidate = Waybill(items=w.items, totals=trial)
             if len(check_totals(candidate)) < len(totals_issues):
-                result.repaired.append(f"итоги: {previous} → {json.dumps(asdict(trial), ensure_ascii=False)}")
+                doc.repaired.append(f"итоги: {previous} → {json.dumps(asdict(trial), ensure_ascii=False)}")
                 w.totals = trial
                 totals_issues = check_totals(w)
                 if not totals_issues:
                     break
 
     bad_codes = {i.code for i in check_requisites(w)} & _REQUISITE_CODES
-    front = next((p for p in result.pages if p.kind == "front"), None)
     if bad_codes and front is not None:
-        _repair_requisites(w, bad_codes, contexts[front.number], asker, result)
+        _repair_requisites(doc, bad_codes, contexts[front], asker, tag)
 
 
-def _repair_requisites(w: Waybill, codes: set[str], ctx: _Context, asker: _Asker, result: TtnResult) -> None:
+def _repair_requisites(doc: TtnDoc, codes: set[str], ctx: _Context, asker: _Asker, tag: str) -> None:
     """Верх страницы — две увеличенные половины; поле берётся, только если новое значение проходит проверку."""
+    w = doc.waybill
     width, height = ctx.image.size
     top = ctx.zones.header[3] if ctx.zones.header[3] < 0.6 * height else int(0.4 * height)
     halves = [(0, 0, int(0.55 * width), top), (int(0.45 * width), 0, width, top)]
@@ -396,7 +488,7 @@ def _repair_requisites(w: Waybill, codes: set[str], ctx: _Context, asker: _Asker
     problem = "; ".join(i.message for i in check_requisites(w) if i.code in codes)
     prompt = prompts.REQUISITES_REPAIR.format(fields=", ".join(names[c] for c in sorted(codes)), problem=problem)
     for k, box in enumerate(halves, 1):
-        data = asker.ask(ctx.image.crop(box), prompt, f"requisites-{k}")
+        data = asker.ask(ctx.image.crop(box), prompt, f"{tag}-requisites-{k}")
         if not data:
             continue
         found = waybill_from_dict(data)
@@ -411,7 +503,7 @@ def _repair_requisites(w: Waybill, codes: set[str], ctx: _Context, asker: _Asker
                 value = getattr(found, code)
                 setattr(trial, code, value)
             if value and code not in {i.code for i in check_requisites(trial)}:
-                result.repaired.append(f"{names[code]}: {value}")
+                doc.repaired.append(f"{names[code]}: {value}")
                 if code.endswith("_unp"):
                     getattr(w, code.removesuffix("_unp")).unp = value
                 else:
