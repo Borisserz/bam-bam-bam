@@ -20,6 +20,13 @@ uv run python scripts\push_scan_debug.py out
 
 Вторая команда кладёт `out\scan.md`, `out\scan.log` и `out\media` (рамки, маска, вырезы ручки и таблиц) в приватный репозиторий `Borisserz/bam-bam-bam-scans`. `scan.env` и кэш модели туда не попадают.
 
+Тот же прогон с локальной подсказкой Chandra 2. По умолчанию флаг выключен: Chandra не становится постоянным шагом, пока два `scan.md` не сравнены. Буквы Dots в промпт Qwen не входят. Адрес — пустой `SCAN_CHANDRA_URL` в `scan.env`.
+
+```powershell
+uv run ingest-parse 123.pdf -o out-chandra\scan-chandra.md --scan-layout --vision --chandra 2>&1 | Tee-Object -FilePath out-chandra\scan-chandra.log
+uv run python scripts\push_scan_debug.py out-chandra
+```
+
 ```powershell
 uv run ingest-parse 123.pdf -o out\scan.md --scan-layout --vision
 ```

@@ -45,10 +45,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="PDF scans: plain 2x render (no native dpi, rotation, deskew, light/noise cleanup, orientation question).",
     )
+    p.add_argument(
+        "--chandra",
+        action="store_true",
+        help="Optional local Chandra 2 markdown hint for Qwen (SCAN_CHANDRA_URL). Off by default.",
+    )
     args = p.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):  # Windows: вывод в файл идёт в cp1251 — символ вне кодировки не роняет запуск
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
+
+    from ingest_parse.letters import set_chandra
+
+    set_chandra(args.chandra)
 
     vision = args.vision or args.vision_force
     if vision:
