@@ -21,6 +21,7 @@ class Prepared:
     skew: float = 0.0  # исправленный наклон, градусы
     steps: list[str] = field(default_factory=list)
     stamps: np.ndarray | None = None  # bool по пикселям image: синие/фиолетовые печати; None — скан серый
+    pen: list[tuple[int, int, int, int]] = field(default_factory=list)  # полосы ручки на image
 
 
 def stamp_mask(image: Image.Image) -> np.ndarray | None:
@@ -47,6 +48,58 @@ def stamp_mask(image: Image.Image) -> np.ndarray | None:
         if bw >= 0.05 * w and bh >= 0.05 * w and 0.4 <= bw / bh <= 2.5:
             keep[i] = True  # круглая / квадратная печать, штамп; строка рукописи сюда не проходит
     return keep[labels] & (ink > 0)
+
+
+def pen_boxes(image: Image.Image) -> list[tuple[int, int, int, int]]:
+    """Полосы ручки: толстые синие/фиолетовые штрихи. Тонкая печать бланка и круглая печать — нет."""
+    mask = pen_mask(image)
+    return [] if mask is None else _boxes_from_pen_mask(mask)
+
+
+def pen_mask(image: Image.Image) -> np.ndarray | None:
+    """Маска пикселей ручки (0/255), до поворотов страницы; None — серый скан."""
+    if image.mode not in ("RGB", "RGBA", "P", "CMYK"):
+        return None
+    rgb = np.asarray(image.convert("RGB"))
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    hue, sat, val = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    ink = ((sat >= 40) & (val <= 210) & (hue >= 90) & (hue <= 170)).astype(np.uint8) * 255
+    if not ink.any():
+        return np.zeros(ink.shape, dtype=np.uint8)
+    return ink
+
+
+def _boxes_from_pen_mask(mask: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """Толщина штриха отделяет ручку от печатной буквы; вытянутость — от печати."""
+    if not mask.any():
+        return []
+    dist = cv2.distanceTransform((mask > 0).astype(np.uint8), cv2.DIST_L2, 3)
+    thick = np.zeros_like(mask)
+    thick[(mask > 0) & (dist >= 2.2)] = 255
+    thick = cv2.morphologyEx(thick, cv2.MORPH_CLOSE, np.ones((5, 15), np.uint8))
+    count, _, stats, _ = cv2.connectedComponentsWithStats(thick, connectivity=8)
+    h, w = mask.shape
+    boxes = []
+    for x, y, bw, bh, _ in stats[1:count]:
+        if bw < 40 or bh < 8 or bh > 0.2 * h or bw < 2 * bh:
+            continue
+        if bw >= 0.05 * w and bh >= 0.05 * w and 0.4 <= bw / max(bh, 1) <= 2.5:
+            continue
+        boxes.append((int(x), int(y), int(x + bw), int(y + bh)))
+    boxes.sort(key=lambda b: (b[1], b[0]))
+    bands: list[list[int]] = []
+    for x0, y0, x1, y1 in boxes:
+        if bands and y0 <= bands[-1][3] + 4:
+            band = bands[-1]
+            band[0], band[1] = min(band[0], x0), min(band[1], y0)
+            band[2], band[3] = max(band[2], x1), max(band[3], y1)
+        else:
+            bands.append([x0, y0, x1, y1])
+    pad = 6
+    return [
+        (max(0, l - pad), max(0, t - pad), min(w, r + pad), min(h, b + pad))
+        for l, t, r, b in bands
+    ]
 
 
 def _gray(image: Image.Image) -> np.ndarray:
@@ -142,23 +195,28 @@ def prepare(
     gray = _gray(image)
     stamps = stamp_mask(image)
     marks = stamps.astype(np.uint8) * 255 if stamps is not None else None  # повороты — те же, что у gray
+    pen = pen_mask(image)
     out = Prepared(image, dpi)
     if dpi < TARGET_DPI - 10:
         factor = TARGET_DPI / dpi
         gray = cv2.resize(gray, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
         if marks is not None:
             marks = cv2.resize(marks, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_NEAREST)
+        if pen is not None:
+            pen = cv2.resize(pen, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_NEAREST)
         out.dpi = TARGET_DPI
         out.steps.append(f"upscale {dpi:.0f}→{TARGET_DPI} dpi")
     if is_sideways(gray):
         gray = cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE)
         marks = cv2.rotate(marks, cv2.ROTATE_90_CLOCKWISE) if marks is not None else None
+        pen = cv2.rotate(pen, cv2.ROTATE_90_CLOCKWISE) if pen is not None else None
         out.rotation = 270
         out.steps.append("rotate 90° (sideways)")
     skew = detect_skew(gray)
     if abs(skew) >= 0.1:
         gray = _rotate(gray, skew, fill=255)
         marks = _rotate(marks, skew, fill=0) if marks is not None else None
+        pen = _rotate(pen, skew, fill=0) if pen is not None else None
         out.skew = skew
         out.steps.append(f"deskew {skew:+.2f}°")
     gray = normalize_light(gray, out.dpi)
@@ -172,6 +230,7 @@ def prepare(
     if turn == 180:
         gray = cv2.rotate(gray, _CV_ROTATE[180])
         marks = cv2.rotate(marks, _CV_ROTATE[180]) if marks is not None else None
+        pen = cv2.rotate(pen, _CV_ROTATE[180]) if pen is not None else None
         out.rotation = (out.rotation + 180) % 360
         out.steps.append("rotate 180° clockwise (vision)")
     elif turn:
@@ -182,6 +241,10 @@ def prepare(
         out.stamps = marks > 127
         if out.stamps.any():
             out.steps.append(f"stamps {out.stamps.mean():.2%}")
+    if pen is not None:
+        out.pen = _boxes_from_pen_mask(pen)
+        if out.pen:
+            out.steps.append(f"pen {len(out.pen)}")
     return out
 
 

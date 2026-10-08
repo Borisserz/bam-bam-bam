@@ -44,7 +44,7 @@ _PAD_PT = 4.0  # поле вокруг выреза, пункты
 _MAX_ROWS = 10  # строк таблицы в одном куске для VLM
 _TILE_HEIGHT = 1600  # px: таблица без линий выше этого — куски по высоте
 _BAND_FACTOR = 1.5  # страница длиннее 1.5 × max_long_edge читается полосами
-_MARK = re.compile(r"\**\\?\[(FIGURE|TABLE)\s+(\d+)\\?\]\**")
+_MARK = re.compile(r"\**\\?\[(FIGURE|TABLE|HAND)\s+(\d+)\\?\]\**")
 _SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}")
 _COLOR = {"figure": "blue", "table": "green", "masked": "gray", "text": "red"}
 _OVER_TEXT = " over-text"  # рисунок поверх текста: на странице не закрашивается
@@ -66,6 +66,7 @@ class _Page:
     dpi: float
     steps: list[str]
     stamps: Any = None  # bool-маска печатей по пикселям image (ttn.preprocess.stamp_mask) или None
+    pen: list[tuple[int, int, int, int]] | None = None  # полосы ручки на image
 
 
 def _safe(text: str) -> str:
@@ -159,7 +160,7 @@ def _load(pdf: Any, number: int, options: ScanOptions, work: Path, cache_dir: Pa
     page = pdf[number - 1]
     try:
         if not options.preprocess:
-            return _Page(page.render(scale=2).to_pil(), 144.0, [])
+            return _Page(page.render(scale=2).to_pil(), 144.0, [], None, [])
         native = _native_dpi(page)
         dpi = min(MAX_DPI, max(MIN_DPI, native or MIN_DPI))
         image = page.render(scale=dpi / 72).to_pil()
@@ -169,7 +170,7 @@ def _load(pdf: Any, number: int, options: ScanOptions, work: Path, cache_dir: Pa
 
     orient = _orienter(options, number, work, cache_dir) if options.client is not None else None
     prep = prepare(image, dpi, orient=orient)
-    return _Page(prep.image, prep.dpi, prep.steps, prep.stamps)
+    return _Page(prep.image, prep.dpi, prep.steps, prep.stamps, prep.pen)
 
 
 def _regions(page: _Page, number: int, options: ScanOptions) -> list[Region] | None:
@@ -234,17 +235,28 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
         return _failure(number, "vision_off", "", link)
     from ingest_parse.vision import VisionError
 
+    hands = [
+        (Region("hand", 1.0, box), f"hand {i}") for i, box in enumerate(page.pen or [], 1)
+    ]
+    if hands:
+        print(f"  page {number}: pen lines={len(hands)}", flush=True)
+        masked = _masked(image if plan is None else masked, hands, page.dpi)
     crops = [(use, r) for r, use in plan or [] if use.startswith(("figure ", "table "))]
     try:
-        if plan is None:
+        if plan is None and not hands:
             sections = _vision(path, number, options)
         else:
-            sections = _page_text(masked, plan, number, options, tmp, path.parent, markers=bool(crops))
+            sections = _page_text(masked, plan or hands, number, options, tmp, path.parent, markers=bool(crops or hands))
     except VisionError as exc:
         return _failure(number, "vision_error", str(exc), link)
     body = sections.pop(_TEXT, "").strip()
+    parts: dict[str, str] = {}
     if crops:
-        body = _merge(body, _crop_parts(page, number, crops, media, tmp, options))
+        parts.update(_crop_parts(page, number, crops, media, tmp, options))
+    if hands:
+        parts.update(_hand_parts(page, number, hands, tmp, options, path.parent))
+    if parts:
+        body = _merge(body, parts)
     if not (body or sections):
         return _failure(number, "vision_empty", "", link)
     _warn(number, "rendered + heron + vision" if plan is not None else "rendered + vision")
@@ -367,7 +379,7 @@ def _masked(image: Any, plan: list[tuple[Region, str]], dpi: float) -> Any:
     out = image.copy()
     draw = ImageDraw.Draw(out)
     for r, use in plan:
-        if use != "masked" and not use.startswith(("figure ", "table ")) or use.endswith(_OVER_TEXT):
+        if use != "masked" and not use.startswith(("figure ", "table ", "hand ")) or use.endswith(_OVER_TEXT):
             continue
         box = _px(r.box, image.size, dpi / 72)
         draw.rectangle(box, fill="white")
@@ -414,6 +426,27 @@ def _save(image: Any, name: str, media: MediaWriter | None, tmp: Path) -> tuple[
         return media.save_named(image, name)
     image.save(tmp / name)
     return tmp / name, None
+
+
+def _hand_parts(
+    page: _Page, number: int, hands: list[tuple[Region, str]], tmp: Path, options: ScanOptions, cache_dir: Path,
+) -> dict[str, str]:
+    """Каждая полоса ручки — отдельный увеличенный вырез, чтобы буквы читались крупнее."""
+    from ingest_parse.vision.prompts import build_hand_prompt
+
+    prompt = build_hand_prompt()
+    parts = {}
+    pad = _PAD_PT * page.dpi / 72
+    for use, region in hands:
+        k = use.split()[1]
+        box = _px(region.box, page.image.size, pad)
+        crop = page.image.crop(box)
+        if crop.height < 180:
+            crop = crop.resize((crop.width * 2, crop.height * 2), Image.Resampling.LANCZOS)
+        path = tmp / f"scan-{number:03d}-hand-{k}.png"
+        crop.save(path)
+        parts[f"HAND {k}"] = _complete(path, prompt, "hand", options, cache_dir).strip()
+    return parts
 
 
 def _crop_parts(
