@@ -121,6 +121,25 @@ def parse_upright(data: dict[str, Any] | None) -> int:
     value = str((data or {}).get("upright", "")).strip().upper()
     return 180 if value in ("B", "В") else 0  # «В» — кириллица, модели путают
 
+
+def parse_upright_answer(answer: str) -> int:
+    """Поворот из ответа целиком: Qwen пишет текст вместо JSON. Неясно, какая копия нормальная — 0 (не крутим)."""
+    data = parse_json(answer)
+    if data and str(data.get("upright") or "").strip():
+        return parse_upright(data)
+    text = answer.upper().translate(str.maketrans({"В": "B", "А": "A"}))
+    named = re.findall(r"КОПИ\w*\s+([AB])", text)
+
+    def upright_letter(letter: str) -> bool:
+        for m in re.finditer(rf"КОПИ\w*\s+{letter}", text):
+            window = text[m.start() : m.end() + 25]
+            if "НОГ" not in window and "ПЕРЕВЕР" not in window:
+                return True
+        return False
+
+    good = [x for x in dict.fromkeys(named) if upright_letter(x)]
+    return 180 if good == ["B"] else 0
+
 TEXT_LAYER = (
     "\nТекстовый слой этой страницы PDF (может быть точнее изображения для цифр; при расхождении сверяйся "
     "с изображением):\n<<<\n{text}\n>>>"

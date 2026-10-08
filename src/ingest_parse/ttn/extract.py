@@ -210,7 +210,8 @@ def _orient(asker: _Asker, name: str):
     from ingest_parse.ttn.preprocess import upright_pair
 
     def check(image: Image.Image) -> int:
-        return prompts.parse_upright(asker.ask(upright_pair(image), prompts.UPRIGHT, name))
+        answer = asker.text(upright_pair(image), prompts.UPRIGHT, name)
+        return prompts.parse_upright_answer(answer or "")
 
     return check
 
