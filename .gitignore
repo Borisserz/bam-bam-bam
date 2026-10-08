@@ -15,5 +15,6 @@ Thumbs.db
 
 examples/output/media/
 media/
+out/
 .vision-cache/
 *.zip
