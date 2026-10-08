@@ -67,6 +67,7 @@ class _Page:
     steps: list[str]
     stamps: Any = None  # bool-маска печатей по пикселям image (ttn.preprocess.stamp_mask) или None
     pen: list[tuple[int, int, int, int]] | None = None  # полосы ручки на image
+    color: Any = None  # RGB после той же геометрии, без denoise/levels; None — кроп ручки с серого
 
 
 def _safe(text: str) -> str:
@@ -123,10 +124,12 @@ def _vision(
     markers: bool = False,
     part: tuple[int, int] | None = None,
     cache_dir: Path | None = None,
+    letters: str = "",
 ) -> dict[str, str]:
+    from ingest_parse.ttn.prompts import with_text_layer
     from ingest_parse.vision.prompts import build_page_prompt, parse_sections
 
-    prompt = build_page_prompt(kind, number, markers=markers, part=part)
+    prompt = with_text_layer(build_page_prompt(kind, number, markers=markers, part=part), letters)
     return parse_sections(_complete(path, prompt, mode, options, cache_dir or path.parent))
 
 
@@ -160,7 +163,8 @@ def _load(pdf: Any, number: int, options: ScanOptions, work: Path, cache_dir: Pa
     page = pdf[number - 1]
     try:
         if not options.preprocess:
-            return _Page(page.render(scale=2).to_pil(), 144.0, [], None, [])
+            rendered = page.render(scale=2).to_pil()
+            return _Page(rendered, 144.0, [], None, [], rendered)
         native = _native_dpi(page)
         dpi = min(MAX_DPI, max(MIN_DPI, native or MIN_DPI))
         image = page.render(scale=dpi / 72).to_pil()
@@ -170,7 +174,7 @@ def _load(pdf: Any, number: int, options: ScanOptions, work: Path, cache_dir: Pa
 
     orient = _orienter(options, number, work, cache_dir) if options.client is not None else None
     prep = prepare(image, dpi, orient=orient)
-    return _Page(prep.image, prep.dpi, prep.steps, prep.stamps, prep.pen)
+    return _Page(prep.image, prep.dpi, prep.steps, prep.stamps, prep.pen, prep.rgb)
 
 
 def _regions(page: _Page, number: int, options: ScanOptions) -> tuple[list[Region] | None, str]:
@@ -247,8 +251,10 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
             _warn(number, "rendered + dots text")
             return _block(number, sha, ocr.strip(), {}, link, "dots.mocr", plan is not None)
         return _failure(number, "vision_off", "", link)
+    from ingest_parse.letters import page_hint
     from ingest_parse.vision import VisionError
 
+    letters = page_hint("", page.color or page.image)
     hands = [
         (Region("hand", 1.0, box), f"hand {i}") for i, box in enumerate(page.pen or [], 1)
     ]
@@ -260,15 +266,17 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
     crops = [(use, r) for r, use in plan or [] if use.startswith(("figure ", "table "))]
     try:
         if plan is None and not hands:
-            sections = _vision(path, number, options)
+            sections = _vision(path, number, options, cache_dir=path.parent, letters=letters)
         else:
-            sections = _page_text(masked, plan or hands, number, options, tmp, path.parent, markers=bool(crops or hands))
+            sections = _page_text(
+                masked, plan or hands, number, options, tmp, path.parent, markers=bool(crops or hands), letters=letters,
+            )
     except VisionError as exc:
         return _failure(number, "vision_error", str(exc), link)
     body = sections.pop(_TEXT, "").strip()
     parts: dict[str, str] = {}
     if crops:
-        parts.update(_crop_parts(page, number, crops, media, tmp, options))
+        parts.update(_crop_parts(page, number, crops, media, tmp, options, letters))
     if hands:
         parts.update(_hand_parts(page, number, hands, media, tmp, options, path.parent))
     if parts:
@@ -281,7 +289,7 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
 
 def _page_text(
     masked: Any, plan: list[tuple[Region, str]], number: int, options: ScanOptions, tmp: Path, cache_dir: Path,
-    *, markers: bool,
+    *, markers: bool, letters: str = "",
 ) -> dict[str, str]:
     """Текст закрашенной страницы; высокая страница — полосами, разрезы только между областями Heron."""
     bands = _bands(masked, plan, options.max_long_edge)
@@ -292,7 +300,7 @@ def _page_text(
         masked.crop((0, top, masked.width, bottom)).save(path)
         part = (i, len(bands)) if len(bands) > 1 else None
         mode = "page_layout" if part is None else "page_band"
-        got = _vision(path, number, options, mode=mode, markers=markers, part=part, cache_dir=cache_dir)
+        got = _vision(path, number, options, mode=mode, markers=markers, part=part, cache_dir=cache_dir, letters=letters)
         texts.append(got.pop(_TEXT, "").strip())
         for key, value in got.items():
             sections.setdefault(key, value)
@@ -458,11 +466,12 @@ def _hand_parts(
 
     prompt = build_hand_prompt()
     parts = {}
+    source = page.color if page.color is not None else page.image
     pad = _PAD_PT * page.dpi / 72
     for use, region in hands:
         k = use.split()[1]
-        box = _px(region.box, page.image.size, pad)
-        crop = page.image.crop(box)
+        box = _px(region.box, source.size, pad)
+        crop = source.crop(box)
         if crop.height < 180:
             crop = crop.resize((crop.width * 2, crop.height * 2), Image.Resampling.LANCZOS)
         name = f"debug/scan-{number:03d}-hand-{k}.png"
@@ -481,7 +490,8 @@ def _hand_parts(
 
 
 def _crop_parts(
-    page: _Page, number: int, crops: list[tuple[str, Region]], media: MediaWriter | None, tmp: Path, options: ScanOptions
+    page: _Page, number: int, crops: list[tuple[str, Region]], media: MediaWriter | None, tmp: Path,
+    options: ScanOptions, letters: str = "",
 ) -> dict[str, str]:
     """{"TABLE 1": Markdown-таблица, "FIGURE 1": vision-блок + ссылка}; вырезы — с выровненной страницы."""
     parts = {}
@@ -493,7 +503,7 @@ def _crop_parts(
             path, link = _save(page.image.crop(box), f"scan-{number:03d}-fig-{k}.png", media, tmp)
             parts[f"FIGURE {k}"] = _figure(path, link, int(k), number, options)
         else:
-            parts[f"TABLE {k}"] = _table(page, box, int(k), number, media, tmp, options)
+            parts[f"TABLE {k}"] = _table(page, box, int(k), number, media, tmp, options, letters)
     return parts
 
 
@@ -582,16 +592,17 @@ def _sharper(path: Path, tmp: Path) -> Path:
 
 
 def _read_table(
-    path: Path, number: int, options: ScanOptions, kind: str, mode: str, tmp: Path, hint: str = ""
+    path: Path, number: int, options: ScanOptions, kind: str, mode: str, tmp: Path, hint: str = "", letters: str = "",
 ) -> tuple[str, str]:
     """(таблица, причина неудачи); не вышло — вторая попытка: увеличенный вырез и строгий промпт."""
+    from ingest_parse.ttn.prompts import with_text_layer
     from ingest_parse.vision import VisionError
     from ingest_parse.vision.prompts import build_page_prompt, build_table_retry_prompt
 
     reason = ""
     tries = [
-        (path, build_page_prompt(kind, number) + hint, mode),
-        (None, build_table_retry_prompt(number) + hint, "table_retry"),
+        (path, with_text_layer(build_page_prompt(kind, number) + hint, letters), mode),
+        (None, with_text_layer(build_table_retry_prompt(number) + hint, letters), "table_retry"),
     ]
     for image, prompt, try_mode in tries:
         try:
@@ -608,7 +619,7 @@ def _read_table(
 
 def _table(
     page: _Page, box: tuple[int, int, int, int], k: int, number: int, media: MediaWriter | None, tmp: Path,
-    options: ScanOptions,
+    options: ScanOptions, letters: str = "",
 ) -> str:
     """Таблица: ≤ 10 строк — один вырез; длиннее — куски по строкам, у каждого сверху шапка таблицы."""
     from ingest_parse.ttn.prompts import grid_hint
@@ -624,7 +635,7 @@ def _table(
         name = f"scan-{number:03d}-table-{k}.png" if len(pieces) == 1 else f"scan-{number:03d}-table-{k}-{j}.png"
         path, link = _save(piece, name, media, tmp)
         kind, mode = ("table_scan", "table_extract") if len(pieces) == 1 else ("table_tile", "table_tile")
-        text, reason = _read_table(path, number, options, kind, mode, tmp, hint)
+        text, reason = _read_table(path, number, options, kind, mode, tmp, hint, letters)
         if text:
             texts.append(text)
         else:

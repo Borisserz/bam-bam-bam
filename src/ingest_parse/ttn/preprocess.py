@@ -22,6 +22,7 @@ class Prepared:
     steps: list[str] = field(default_factory=list)
     stamps: np.ndarray | None = None  # bool по пикселям image: синие/фиолетовые печати; None — скан серый
     pen: list[tuple[int, int, int, int]] = field(default_factory=list)  # полосы ручки на image
+    rgb: Image.Image | None = None  # те же пиксельные размеры, что image; без denoise/levels
 
 
 def stamp_mask(image: Image.Image) -> np.ndarray | None:
@@ -137,7 +138,8 @@ def _unskew(img: np.ndarray, angle: float, fill: int = 0) -> np.ndarray:
     nw, nh = int(h * sin + w * cos), int(h * cos + w * sin)
     m[0, 2] += (nw - w) / 2
     m[1, 2] += (nh - h) / 2
-    return cv2.warpAffine(img, m, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=fill)
+    border = fill if img.ndim == 2 else (fill, fill, fill)
+    return cv2.warpAffine(img, m, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=border)
 
 
 def _sharpness(ink: np.ndarray) -> float:
@@ -205,6 +207,7 @@ def prepare(
 ) -> Prepared:
     """orient(картинка) → на сколько градусов по часовой повернуть (0/90/180/270; спрашиваем VLM); None — не спрашивать."""
     gray = _gray(image)
+    color = np.asarray(image.convert("RGB"))
     stamps = stamp_mask(image)
     marks = stamps.astype(np.uint8) * 255 if stamps is not None else None  # повороты — те же, что у gray
     pen = pen_mask(image)
@@ -212,6 +215,7 @@ def prepare(
     if dpi < TARGET_DPI - 10:
         factor = TARGET_DPI / dpi
         gray = cv2.resize(gray, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
+        color = cv2.resize(color, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_CUBIC)
         if marks is not None:
             marks = cv2.resize(marks, (gray.shape[1], gray.shape[0]), interpolation=cv2.INTER_NEAREST)
         if pen is not None:
@@ -220,6 +224,7 @@ def prepare(
         out.steps.append(f"upscale {dpi:.0f}→{TARGET_DPI} dpi")
     if is_sideways(gray):
         gray = cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE)
+        color = cv2.rotate(color, cv2.ROTATE_90_CLOCKWISE)
         marks = cv2.rotate(marks, cv2.ROTATE_90_CLOCKWISE) if marks is not None else None
         pen = cv2.rotate(pen, cv2.ROTATE_90_CLOCKWISE) if pen is not None else None
         out.rotation = 270
@@ -227,6 +232,7 @@ def prepare(
     skew = detect_skew(gray)
     if abs(skew) >= 0.1:
         gray = _unskew(gray, skew, fill=255)
+        color = _unskew(color, skew, fill=255)
         marks = _unskew(marks, skew, fill=0) if marks is not None else None
         pen = _unskew(pen, skew, fill=0) if pen is not None else None
         out.skew = skew
@@ -241,6 +247,7 @@ def prepare(
     turn = orient(Image.fromarray(gray)) % 360 if orient is not None else 0
     if turn == 180:
         gray = cv2.rotate(gray, _CV_ROTATE[180])
+        color = cv2.rotate(color, _CV_ROTATE[180])
         marks = cv2.rotate(marks, _CV_ROTATE[180]) if marks is not None else None
         pen = cv2.rotate(pen, _CV_ROTATE[180]) if pen is not None else None
         out.rotation = (out.rotation + 180) % 360
@@ -249,6 +256,7 @@ def prepare(
         # строки уже горизонтальны (геометрия выше); 90/270 от VLM — частая ошибка, лист на бок не кладём
         out.steps.append(f"vision said {turn}°, ignored")
     out.image = Image.fromarray(gray)
+    out.rgb = Image.fromarray(color)
     if marks is not None:
         out.stamps = marks > 127
         if out.stamps.any():

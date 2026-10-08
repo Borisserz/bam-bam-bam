@@ -61,6 +61,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         config = dataclasses.replace(config, temperature=0.0, timeout_s=max(config.timeout_s, 180.0))
         client, max_edge = VisionClient(config), config.max_long_edge
+    from ingest_parse.parse import _dots_sender
+
+    sender = _dots_sender()
     options = TtnOptions(
         client=client,
         force=args.vision_force,
@@ -71,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         heron=not args.no_heron,
         debug=args.debug,
         on_page=_progress,
+        dots=sender,
     )
 
     files = _inputs(args.paths)
