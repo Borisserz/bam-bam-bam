@@ -11,7 +11,14 @@ uv sync
 
 Весь пайплайн: Heron + dots + линии таблиц + чернила, затем Qwen. Текст — `out\scan.md`, рамки — `out\media\123\debug\`.
 Тот же запуск для `.pdf`, `.jpg`, `.jpeg`, `.png`, `.tif`, `.tiff`, `.webp`, `.bmp`: поворот из телефона (EXIF) применяется сам, лист не раздувается из‑за ложных 72 dpi.
-В консоли на странице: `page N: dots ...` и, если нашлась синяя или фиолетовая ручка, `page N: pen lines=K`.
+В консоли на странице: `preprocess`, `dots`, `pen lines=K`, для каждой полосы ручки `pen K box= crop= chars=`, для таблицы `table K pieces= chars=`.
+
+```powershell
+uv run ingest-parse 123.pdf -o out\scan.md --scan-layout --vision 2>&1 | Tee-Object -FilePath out\scan.log
+uv run python scripts\push_scan_debug.py out
+```
+
+Вторая команда кладёт `out\scan.md`, `out\scan.log` и `out\media` (рамки, маска, вырезы ручки и таблиц) в приватный репозиторий `Borisserz/bam-bam-bam-scans`. `scan.env` и кэш модели туда не попадают.
 
 ```powershell
 uv run ingest-parse 123.pdf -o out\scan.md --scan-layout --vision

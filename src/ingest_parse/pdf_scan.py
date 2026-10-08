@@ -230,6 +230,8 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
         path, link = tmp / f"scan-{number:03d}.png", None
         image.save(path)
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    if page.steps:
+        print(f"  page {number}: preprocess {'; '.join(page.steps)}", flush=True)
 
     plan = None
     ocr = ""
@@ -238,10 +240,9 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
         plan = _plan(regions, image.size) if regions is not None else None
     if plan is not None:
         masked = _masked(image, plan, page.dpi)
-        if media is not None:
-            _save_debug(media, number, page, masked, plan)
-
     if options.client is None:
+        if media is not None and plan is not None:
+            _save_debug(media, number, page, masked, plan)
         if ocr.strip():
             _warn(number, "rendered + dots text")
             return _block(number, sha, ocr.strip(), {}, link, "dots.mocr", plan is not None)
@@ -254,6 +255,8 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
     if hands:
         print(f"  page {number}: pen lines={len(hands)}", flush=True)
         masked = _masked(image if plan is None else masked, hands, page.dpi)
+    if media is not None and plan is not None:
+        _save_debug(media, number, page, masked, plan)
     crops = [(use, r) for r, use in plan or [] if use.startswith(("figure ", "table "))]
     try:
         if plan is None and not hands:
@@ -267,7 +270,7 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
     if crops:
         parts.update(_crop_parts(page, number, crops, media, tmp, options))
     if hands:
-        parts.update(_hand_parts(page, number, hands, tmp, options, path.parent))
+        parts.update(_hand_parts(page, number, hands, media, tmp, options, path.parent))
     if parts:
         body = _merge(body, parts)
     if not (body or sections):
@@ -418,6 +421,10 @@ def _save_debug(media: MediaWriter, number: int, page: _Page, masked: Any, plan:
         box = _px(r.box, boxes.size, 0.0)
         draw.rectangle(box, outline=color, width=4)
         draw.text((box[0] + 4, max(0, box[1] - 30)), f"{r.label} {r.confidence:.2f} → {use}", fill=color, font=font)
+    for i, raw in enumerate(page.pen or [], 1):
+        box = _px(raw, boxes.size, 0.0)
+        draw.rectangle(box, outline="magenta", width=4)
+        draw.text((box[0] + 4, max(0, box[1] - 30)), f"hand {i}", fill="magenta", font=font)
     stem = f"debug/scan-{number:03d}"
     media.save_named(boxes, f"{stem}-heron.png")
     media.save_named(masked, f"{stem}-masked.png")
@@ -430,6 +437,7 @@ def _save_debug(media: MediaWriter, number: int, page: _Page, masked: Any, plan:
             {"label": r.label, "confidence": round(r.confidence, 3), "box_px": [round(v) for v in r.box], "use": use}
             for r, use in plan
         ],
+        "pen": [[round(v) for v in box] for box in (page.pen or [])],
     }
     (media.directory / f"{stem}-heron.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -442,7 +450,8 @@ def _save(image: Any, name: str, media: MediaWriter | None, tmp: Path) -> tuple[
 
 
 def _hand_parts(
-    page: _Page, number: int, hands: list[tuple[Region, str]], tmp: Path, options: ScanOptions, cache_dir: Path,
+    page: _Page, number: int, hands: list[tuple[Region, str]], media: MediaWriter | None, tmp: Path,
+    options: ScanOptions, cache_dir: Path,
 ) -> dict[str, str]:
     """Каждая полоса ручки — отдельный увеличенный вырез, чтобы буквы читались крупнее."""
     from ingest_parse.vision.prompts import build_hand_prompt
@@ -456,9 +465,18 @@ def _hand_parts(
         crop = page.image.crop(box)
         if crop.height < 180:
             crop = crop.resize((crop.width * 2, crop.height * 2), Image.Resampling.LANCZOS)
-        path = tmp / f"scan-{number:03d}-hand-{k}.png"
-        crop.save(path)
-        parts[f"HAND {k}"] = _complete(path, prompt, "hand", options, cache_dir).strip()
+        name = f"debug/scan-{number:03d}-hand-{k}.png"
+        if media is not None:
+            path, _ = media.save_named(crop, name)
+        else:
+            path = tmp / f"scan-{number:03d}-hand-{k}.png"
+            crop.save(path)
+        text = _complete(path, prompt, "hand", options, cache_dir).strip()
+        print(
+            f"  page {number}: pen {k} box={box} crop={crop.size[0]}x{crop.size[1]} chars={len(text)}",
+            flush=True,
+        )
+        parts[f"HAND {k}"] = text
     return parts
 
 
@@ -618,6 +636,10 @@ def _table(
             )
             label = alt if len(pieces) == 1 else f"{alt}, часть {j}"
             misses.append(image_markdown(label, link) if link is not None else f"<!-- {label}: not extracted -->")
+    print(
+        f"  page {number}: table {k} pieces={len(pieces)} chars={sum(len(t) for t in texts)} misses={len(misses)}",
+        flush=True,
+    )
     out = [_join_tables(texts)] if texts else []
     return "\n\n".join(out + misses)
 
