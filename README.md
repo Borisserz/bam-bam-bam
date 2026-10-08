@@ -1,5 +1,47 @@
 # ingest-parse
 
+## Быстрый старт: накладные ТН-2 / ТТН-1 на рабочем ПК (PowerShell)
+
+1. Обновить зависимости (~1 мин):
+
+   ```powershell
+   uv sync
+   ```
+
+2. Адрес модели и настройки:
+
+   ```powershell
+   $env:VISION_API_BASE_URL = "http://localhost:8080"   # адрес image-to-text модели
+   $env:INGEST_VISION_MAX_LONG_EDGE = "2560"
+   $env:INGEST_VISION_REASONING = "off"                 # отвечает быстрее
+   ```
+
+3. Проверить разметку без модели (~30 с):
+
+   ```powershell
+   uv run ingest-ttn D:\scans\ttn\один.pdf -o out\test --no-vision
+   ```
+
+   При первом запуске Heron скачает веса (~200 МБ). Открыть `out\test\<имя>\page-01-zones.png`: синяя, зелёная
+   и оранжевая рамки. В консоли `heron failed` — нет интернета; тогда скачать модели и повторить шаг:
+
+   ```powershell
+   uv run docling-tools models download -o C:\docling-models; $env:DOCLING_ARTIFACTS_PATH = "C:\docling-models"
+   ```
+
+4. Полный прогон с моделью:
+
+   ```powershell
+   uv run ingest-ttn D:\scans\ttn -o out\ttn
+   ```
+
+   По каждому файлу — `OK` или `CHECK: N errors`; результаты в `out\ttn\<имя>.ttn.md` и `.ttn.json`.
+
+5. Если что-то не так: HTTP 400/413 — `$env:INGEST_VISION_MAX_LONG_EDGE = "2048"`; таймауты —
+   `$env:INGEST_VISION_TIMEOUT_S = "600"`.
+
+dots для накладных не нужна: `ingest-ttn` размечает Heron + линии бланка + добор чернил.
+
 `.txt` / `.doc` / `.docx` / `.docm` / `.rtf` / `.pdf` → **Markdown-строка** для RAG (chunking, embeddings,
 цитирование) + папка `media/` с картинками. DOCX и PDF разбирает [Docling](https://github.com/docling-project/docling)
 (`docling-slim`, без OCR); `.doc` и `.rtf` сначала конвертируются LibreOffice в `.docx`. Born-digital PDF
