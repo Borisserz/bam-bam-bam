@@ -178,12 +178,17 @@ def _regions(page: _Page, number: int, options: ScanOptions) -> list[Region] | N
         warnings.warn(f"heron layout failed: {exc}; page {number} goes without layout", PdfPageWarning, stacklevel=4)
         return None
     dots = []
-    if options.dots is not None:
+    if options.dots is None:
+        print(f"  page {number}: dots off (SCAN_DOTS_URL is empty)", flush=True)
+    else:
         from ingest_parse.ttn.dots import dots_layout
 
         try:
-            dots, _ = dots_layout(page.image, options.dots)
+            dots, status = dots_layout(page.image, options.dots)
+            tables = sum(d.role == "table" for d in dots)
+            print(f"  page {number}: dots {status}; regions={len(dots)}; tables={tables}", flush=True)
         except Exception as exc:  # сервер dots недоступен — хватит Heron и линий
+            print(f"  page {number}: dots FAILED {type(exc).__name__}: {exc}", flush=True)
             warnings.warn(f"dots layout failed: {exc}; page {number} uses heron + lines", PdfPageWarning, stacklevel=4)
     from ingest_parse.ttn.preprocess import without_stamps
 

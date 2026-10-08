@@ -10,6 +10,7 @@ import base64
 import io
 import json
 import re
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 
@@ -38,8 +39,31 @@ def sent_size(size: tuple[int, int], long_edge: int) -> tuple[int, int]:
     return max(28, round(w * scale / 28) * 28), max(28, round(h * scale / 28) * 28)
 
 
+def _plain(answer: str) -> str:
+    """JSON иногда приходит после <think> или в ```json."""
+    text = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL)
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    return re.sub(r"^```[\w-]*\s*|\s*```$", "", text.strip()).strip()
+
+
+def message_text(data: dict) -> str:
+    """Текст ответа dots. Пустой content — частый ответ llama.cpp, буква лежит в reasoning_content."""
+    message = data["choices"][0]["message"]
+    if not isinstance(message, dict):
+        raise TypeError(f"dots unexpected message: {str(data)[:200]}")
+    text = message.get("content")
+    if not str(text or "").strip():
+        text = message.get("reasoning_content") or message.get("reasoning")
+    text = str(text or "").strip()
+    if not text:
+        raise RuntimeError(f"dots empty content; message keys={list(message)}")
+    return text
+
+
 def parse_dots(answer: str, size: tuple[int, int], long_edge: int) -> tuple[list[Det], str]:
     """(рамки в пикселях кадра size, статус ok | salvaged | invalid | collapsed)."""
+    answer = _plain(answer)
     sw, sh = sent_size(size, long_edge)
     status = "ok"
     try:
@@ -62,20 +86,24 @@ def parse_dots(answer: str, size: tuple[int, int], long_edge: int) -> tuple[list
     return dets, status
 
 
-def _ask(image: Image.Image, send: Send, long_edge: int) -> tuple[list[Det], str]:
+def _ask(image: Image.Image, send: Send, long_edge: int) -> tuple[list[Det], str, str]:
     sent = image.convert("RGB").resize(sent_size(image.size, long_edge), Image.Resampling.LANCZOS)
-    return parse_dots(send(sent, PROMPT), image.size, long_edge)
+    answer = send(sent, PROMPT)
+    dets, status = parse_dots(answer, image.size, long_edge)
+    if status == "invalid":
+        status = "invalid: " + " ".join(str(answer).split())[:160]
+    return dets, status, answer
 
 
 def dots_layout(image: Image.Image, send: Send, long_edge: int = LONG_EDGE) -> tuple[list[Det], str]:
     """Разметка dots; схлопнулась — повтор на верхней и нижней половинах (схлопнувшаяся половина выбрасывается)."""
-    dets, status = _ask(image, send, long_edge)
-    if status != "collapsed":
+    dets, status, _ = _ask(image, send, long_edge)
+    if not status.startswith("collapsed"):
         return dets, status
     w, h = image.size
     tiles = []
     for box in ((0, 0, w, int(_HALF * h)), (0, int((1 - _HALF) * h), w, h)):
-        part, part_status = _ask(image.crop(box), send, long_edge)
+        part, part_status, _ = _ask(image.crop(box), send, long_edge)
         if part_status != "collapsed":
             tiles.append((part, box))
     return merge_tiles([], tiles, (w, h), stitch=True), "halves"
@@ -100,8 +128,13 @@ def http_sender(url: str, model: str, max_tokens: int = 3000, timeout: float = 6
             "temperature": 0,
         }
         base = url.rstrip("/").removesuffix("/v1/chat/completions").removesuffix("/v1")
-        req = urllib.request.Request(base + "/v1/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return str(json.load(resp)["choices"][0]["message"]["content"])
+        endpoint = base + "/v1/chat/completions"
+        req = urllib.request.Request(endpoint, json.dumps(body).encode(), {"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return message_text(json.load(resp))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read()[:300].decode("utf-8", "replace").replace("\n", " ")
+            raise RuntimeError(f"HTTP {exc.code} from {endpoint}: {detail}") from exc
 
     return send
