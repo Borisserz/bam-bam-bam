@@ -323,6 +323,21 @@ def table_chunks(image: Image.Image, z: Zones, max_rows: int = MAX_ROWS) -> list
     return chunks
 
 
+_ROLE_COLOR = {"table": (0, 160, 0), "picture": (0, 90, 255), "margin": (150, 150, 150), "text": (220, 0, 0)}
+
+
+def draw_layout(image: Image.Image, regions: list[tuple[str, float, Box]]) -> Image.Image:
+    """Разметка страницы: зелёные — таблицы, красные — текст, синие — картинки, серые — колонтитулы."""
+    out = image.convert("RGB")
+    draw = ImageDraw.Draw(out)
+    width = max(3, out.width // 400)
+    for label, conf, box in regions:
+        color = _ROLE_COLOR.get(label, (255, 150, 0))
+        draw.rectangle(box, outline=color, width=width)
+        draw.text((box[0] + width + 2, box[1] + width + 2), f"{label} {conf:.2f}", fill=color)
+    return out
+
+
 def draw_zones(image: Image.Image, z: Zones) -> Image.Image:
     out = image.convert("RGB")
     draw = ImageDraw.Draw(out)

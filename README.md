@@ -22,8 +22,8 @@
    uv run ingest-ttn D:\scans\ttn\один.pdf -o out\test --no-vision
    ```
 
-   При первом запуске Heron скачает веса (~200 МБ). Открыть `out\test\<имя>\page-01-zones.png`: синяя, зелёная
-   и оранжевая рамки. В консоли `heron failed` — нет интернета; тогда скачать модели и повторить шаг:
+   При первом запуске Heron скачает веса (~200 МБ). Открыть `out\test\<имя>\page-01-layout.png`: красные рамки —
+   текст, зелёные — таблицы, синие — картинки. В консоли `heron failed` — нет интернета; тогда скачать модели и повторить шаг:
 
    ```powershell
    uv run docling-tools models download -o C:\docling-models; $env:DOCLING_ARTIFACTS_PATH = "C:\docling-models"
@@ -496,9 +496,10 @@ uv run ingest-ttn ttn.pdf -o out\ttn --vision-force        # переспрос�
 |---|---|
 | `out\ttn\<имя>.ttn.md` | реквизиты, товарный раздел (✓/✗ по строкам), итоги, список проверок, картинки страниц |
 | `out\ttn\<имя>.ttn.json` | то же в JSON: `status` (`ok` / `check` / `no_vision`), `waybill`, `issues`, `repaired` |
-| `out\ttn\<имя>\page-NN-prepared.png` | страница после предобработки |
-| `out\ttn\<имя>\page-NN-zones.png` | зоны: синяя — шапка, зелёная — таблица (линии строк), оранжевая — низ, красная — конец шапки таблицы |
-| `out\ttn\<имя>\page-NN-table-K.png` | куски таблицы, ровно то, что видела модель |
+| `out\ttn\<имя>\page-NN-layout.png` | разметка страницы: красные — текст, зелёные — таблицы, синие — картинки, серые — колонтитулы |
+| с `--debug`: `page-NN-prepared.png` | страница после предобработки |
+| с `--debug`: `page-NN-zones.png` | зоны: синяя — шапка, зелёная — таблица (линии строк), оранжевая — низ, красная — конец шапки таблицы |
+| с `--debug`: `page-NN-table-K.png` и др. | вырезы, ровно то, что видела модель |
 
 Как работает:
 
@@ -533,7 +534,7 @@ uv run pytest -q tests\test_ttn.py                        # только нак�
 | `error: Vision API is not configured`, код 2 | задать `VISION_API_BASE_URL` (блок 4) |
 | `reason="vision_error"` в блоке скана | `curl.exe http://localhost:8080/v1/models`, перезапустить с `--vision` |
 | кракозябры в консоли | писать в файл через `-o`, stdout всегда UTF-8 |
-| `ingest-ttn`: `CHECK` на хорошем скане | открыть `page-NN-zones.png`: найдена ли таблица и строки; затем `.ttn.md` → «Проверки» |
+| `ingest-ttn`: `CHECK` на хорошем скане | прогнать с `--debug`, открыть `page-NN-zones.png`: найдена ли таблица и строки; затем `.ttn.md` → «Проверки» |
 | `ingest-ttn`: HTTP 400/413 от модели | сервер не принимает большие картинки: `$env:INGEST_VISION_MAX_LONG_EDGE = "2048"` |
 | `ingest-ttn`: таймауты / долгие ответы | `$env:INGEST_VISION_REASONING = "off"`; если не помогло — `$env:INGEST_VISION_TIMEOUT_S = "600"` |
 

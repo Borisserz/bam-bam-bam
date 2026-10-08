@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import tempfile
 import warnings
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -30,6 +31,7 @@ from ingest_parse.ttn.validate import Issue, check_item, check_requisites, check
 from ingest_parse.ttn.zones import (
     Box,
     Zones,
+    draw_layout,
     draw_zones,
     fields_image,
     find_zones,
@@ -58,6 +60,7 @@ class TtnOptions:
     orientation: bool = True
     denoise: bool = True
     heron: bool = True
+    debug: bool = False  # кроме разметки страницы сохранять предобработку, зоны и вырезы для VLM
 
 
 @dataclass
@@ -116,13 +119,14 @@ class _RowRef:
 
 
 class _Asker:
-    """VLM с кэшем: картинка сохраняется в work/<имя>.png, ответ — в work/.vision-cache."""
+    """VLM с кэшем: вырез — в work/<имя>.png (без debug — во временную папку), ответ — в work/.vision-cache."""
 
     def __init__(self, options: TtnOptions, work: Path) -> None:
         from ingest_parse.vision.cache import VisionCache
 
         self.options = options
-        self.work = work
+        self._tmp = None if options.debug else tempfile.TemporaryDirectory(prefix="ingest-ttn-")
+        self.work = work if self._tmp is None else Path(self._tmp.name)
         self.cache = VisionCache(work / ".vision-cache")
         self.calls = 0
         self.errors: list[str] = []
@@ -212,7 +216,8 @@ def _read_fields(
         return
     name = f"page-{page:02d}-header-fields"
     data = asker.ask(strip, prompts.FIELDS.format(page=page), name)
-    report.images["поля формы"] = rel(work / f"{name}.png")
+    if asker.options.debug:
+        report.images["поля формы"] = rel(work / f"{name}.png")
     if data:
         _merge_header(waybill, {k: v for k, v in data.items() if k in _FIELD_KEYS})
 
@@ -260,12 +265,17 @@ def extract_ttn(path: Path, out_dir: Path, options: TtnOptions) -> TtnResult:
         chunks = table_chunks(image, zones)
         report = PageReport(n, "front" if n == 1 else "continuation", prep.dpi, page.native_dpi, prep.steps,
                             zones.source, len(zones.rows), len(chunks))
-        image.save(work / f"{tag}-prepared.png")
-        draw_zones(image, zones).save(work / f"{tag}-zones.png")
-        report.images = {"страница после предобработки": rel(work / f"{tag}-prepared.png"),
-                         "зоны и строки": rel(work / f"{tag}-zones.png")}
+        draw_layout(image, regions).save(work / f"{tag}-layout.png")
+        report.images = {"разметка страницы": rel(work / f"{tag}-layout.png")}
+        if options.debug:
+            image.save(work / f"{tag}-prepared.png")
+            draw_zones(image, zones).save(work / f"{tag}-zones.png")
+            report.images |= {"страница после предобработки": rel(work / f"{tag}-prepared.png"),
+                              "зоны и строки": rel(work / f"{tag}-zones.png")}
         pages.append(report)
         if asker is None:
+            if not options.debug:
+                continue
             for k, chunk in enumerate(chunks, 1):
                 chunk.image.save(work / f"{tag}-table-{k}.png")
             _crop(image, zones.header).save(work / f"{tag}-header.png")

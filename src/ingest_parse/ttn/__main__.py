@@ -24,12 +24,13 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="ingest-ttn", description="ТН-2 / ТТН-1 (Беларусь): PDF-скан → JSON + Markdown.")
     p.add_argument("paths", type=Path, nargs="+", help="PDF files or folders (recursively)")
     p.add_argument("-o", "--output", type=Path, default=Path("out_ttn"), help="Output folder (default: out_ttn)")
-    p.add_argument("--no-vision", action="store_true", help="Only preprocessing + zones (debug images), no VLM.")
+    p.add_argument("--no-vision", action="store_true", help="Only preprocessing + page layout, no VLM.")
     p.add_argument("--vision-force", action="store_true", help="Ignore the VLM answer cache.")
     p.add_argument("--no-heron", action="store_true", help="Do not run Heron layout (fixed bands instead).")
     p.add_argument("--no-orientation", action="store_true", help="Skip the upside-down check.")
     p.add_argument("--no-denoise", action="store_true", help="Skip denoising (faster).")
     p.add_argument("--repair-rounds", type=int, default=2, help="Re-read rounds for rows failing checks (default 2).")
+    p.add_argument("--debug", action="store_true", help="Also save preprocessed page, zones and VLM crops.")
     args = p.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):  # Windows: вывод в файл идёт в cp1251, «→» и кириллица имён не падают
         if hasattr(stream, "reconfigure"):
@@ -57,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         orientation=not args.no_orientation,
         denoise=not args.no_denoise,
         heron=not args.no_heron,
+        debug=args.debug,
     )
 
     files = _inputs(args.paths)
