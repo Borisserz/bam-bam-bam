@@ -1,24 +1,18 @@
 # ingest-parse
 
-Сервер dots с одной моделью отвечает и на чужое имя в запросе. На нём сейчас `dots mocr f16 gguf`.
-Адрес dots подставь свой. Qwen Ильи — `http://192.168.4.101:8080`, без ключа.
-
-Картинка разметки целиком (Heron + dots + линии + чернила), в текстовую модель ничего не уходит.
-Файл `out\layout\123-p1.png`: зелёное — таблица, красное — текст, синее — картинка, фиолетовое — чернила.
+Heron + dots + линии таблиц + чернила, и страница уходит в Qwen (image-to-text).
+Адрес dots подставь свой. `id` модели — из второй команды, не из названия файла.
+В консоли на каждой странице строка `page N: dots ...`. Текст — `out\scan.md`, рамки — `out\media\123\debug\`.
 
 ```powershell
-uv run python scripts/compare_layout.py 123.pdf -o out\layout --dots-url "http://АДРЕС:ПОРТ" --dots-model "dots mocr f16 gguf" --max-pages 30 --fused
-```
-
-Та же склейка и отправка страницы в image-to-text. Текст — `out\scan.md`, рамки — `out\media\123\debug\`.
-
-```powershell
+git pull
 Remove-Item Env:VISION_API_KEY, Env:VISION_MODEL -ErrorAction SilentlyContinue
 $env:VISION_API_BASE_URL = "http://192.168.4.101:8080"
 $env:INGEST_VISION_MAX_LONG_EDGE = "2560"
 $env:INGEST_VISION_REASONING = "off"
 $env:SCAN_DOTS_URL = "http://АДРЕС:ПОРТ"
-$env:SCAN_DOTS_MODEL = "dots mocr f16 gguf"
+(Invoke-RestMethod "$env:SCAN_DOTS_URL/v1/models").data.id
+$env:SCAN_DOTS_MODEL = "<id из строки выше>"
 uv run ingest-parse 123.pdf -o out\scan.md --scan-layout --vision
 ```
 
