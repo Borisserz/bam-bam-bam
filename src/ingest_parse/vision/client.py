@@ -111,20 +111,42 @@ def build_body(
     return body
 
 
+def _as_text(value: Any) -> str:
+    if isinstance(value, list):
+        return "".join(p.get("text", "") for p in value if isinstance(p, dict))
+    return value if isinstance(value, str) else ""
+
+
+def _after_think(raw: str) -> str:
+    """Ответ после <think>: шаблон Qwen3 иногда открывает тег сам, закрывающий приходит в тексте."""
+    text = _THINK.sub("", raw)
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    return text.strip()
+
+
+def _think_body(raw: str) -> str:
+    parts = [p.strip() for p in re.findall(r"<think>(.*?)</think>", raw, re.DOTALL) if p.strip()]
+    return parts[-1] if parts else ""
+
+
 def _content(data: Any) -> str:
     try:
-        content = data["choices"][0]["message"]["content"]
+        message = data["choices"][0]["message"]
     except (KeyError, IndexError, TypeError) as exc:
         raise VisionError(f"unexpected response: {str(data)[:200]}") from exc
-    if isinstance(content, list):
-        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
-    text = _THINK.sub("", content or "")
-    if "</think>" in text:  # шаблон модели сам открыл <think>: рассуждение без открывающего тега
-        text = text.rsplit("</think>", 1)[1]
-    text = text.strip()
-    if not text:
-        raise VisionError("empty response")
-    return text
+    if not isinstance(message, dict):
+        raise VisionError(f"unexpected response: {str(data)[:200]}")
+    # Короткий ответ («B») Qwen3 часто оставляет только в reasoning_content, content = null.
+    chunks = [_as_text(message.get("content"))]
+    chunks += [_as_text(message.get(key)) for key in ("reasoning_content", "reasoning")]
+    for raw in chunks:
+        if text := _after_think(raw):
+            return text
+    for raw in chunks:
+        if text := _think_body(raw):
+            return text
+    raise VisionError("empty response")
 
 
 def _body(exc: urllib.error.HTTPError) -> str:

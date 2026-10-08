@@ -210,7 +210,12 @@ def _orient(asker: _Asker, name: str, notes: list[str]):
     from ingest_parse.ttn.preprocess import upright_pair
 
     def check(image: Image.Image) -> int:
+        before = len(asker.errors)
         answer = asker.text(upright_pair(image), prompts.UPRIGHT, name) or ""
+        if not answer and len(asker.errors) > before:
+            reason = asker.errors[-1].split(": ", 1)[-1]
+            notes.append(f"orientation failed: {reason[:120]}")
+            return 0
         turn = prompts.parse_upright_answer(answer)
         notes.append(f"orientation {turn}° ← {' '.join(answer.split())[:80] or 'no answer'}")
         return turn
