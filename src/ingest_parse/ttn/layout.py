@@ -133,7 +133,10 @@ def _tables_in(horiz: np.ndarray, vert: np.ndarray, at: tuple[int, int], page: t
         # столбец таблицы идёт через всю её высоту; штрихи печати и перегородка в подписях — нет
         cols = _runs(vert[y0:y1, l:r].sum(axis=0) / 255 >= 0.5 * (y1 - y0))
         frame = y1 - y0 > 0.5 * h and cols < 6  # кайма скана / рамка листа: всё внутри — одна «таблица»
-        if rows >= 3 and cols >= 3 and not frame:
+        # ТТН-1: строк без линий, только столбцы во всю высоту (штрихкод в плашке короче)
+        tall = _runs(vert[y0:y1, l:r].sum(axis=0) / 255 >= 0.9 * (y1 - y0)) if rows < 3 else 0
+        ruled = rows >= 3 and cols >= 3 or rows >= 1 and tall >= 6
+        if ruled and not frame:
             t, b, l, r = _trim_banner(band, vert[y0:y1], l, r)
             out.append((at[0] + l, at[1] + y0 + t, at[0] + r, at[1] + y0 + b))
         elif depth > 0:
@@ -245,8 +248,9 @@ def _bands(
 
 
 def _capped(horiz: np.ndarray, span: tuple[int, int, int, int]) -> bool:
-    """Конец вертикали упирается в горизонталь (граница таблицы или строки); у обрезанного фрагмента бланка
-    низ таблицы может быть оторван, поэтому хватает одного конца."""
+    """Вертикаль упирается концом в горизонталь (граница таблицы или строки) или пересекает её (линия шапки
+    у таблицы без линий строк, где концы столбцов на скане не доходят до рамки); у обрезанного фрагмента
+    бланка низ таблицы может быть оторван, поэтому хватает одного конца."""
     t, b, l, r = span
     reach = max(8, int(0.004 * horiz.shape[0]))
     x0, x1 = max(0, l - 8), r + 8
@@ -254,7 +258,11 @@ def _capped(horiz: np.ndarray, span: tuple[int, int, int, int]) -> bool:
     def hit(y: int) -> bool:
         return bool(horiz[max(0, y - reach) : y + reach, x0:x1].any())
 
-    return hit(t) or hit(b - 1)
+    def crossed() -> bool:
+        rows = horiz[t:b]
+        return bool((rows[:, max(0, l - 3)].astype(bool) & rows[:, min(rows.shape[1] - 1, r + 2)].astype(bool)).any())
+
+    return hit(t) or hit(b - 1) or crossed()
 
 
 def _shared(a: list[int], b: list[int], tol: int = 10) -> int:
