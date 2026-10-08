@@ -78,6 +78,17 @@ def side_by_side(a: Image.Image, b: Image.Image) -> Image.Image:
     return out
 
 
+def _fused_page(page: Image.Image, dets: list[Det]) -> Image.Image:
+    """Страница целиком: все источники уже склеены. Фиолетовое — добор чернил."""
+    out = page.convert("RGB")
+    draw = ImageDraw.Draw(out)
+    width = max(3, out.width // 400)
+    for d in dets:
+        color = _COLOR["ink"] if d.source == "ink" else _COLOR.get(d.role, (255, 150, 0))
+        draw.rectangle(d.box, outline=color, width=width)
+    return out
+
+
 def _panel(page: Image.Image, dets: list[Det], title: str) -> Image.Image:
     return overlay(page, [(d.label or d.role, d.score, d.box, d.source) for d in dets], title)
 
@@ -130,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-tiles", action="store_true", help="Heron без половин страницы")
     ap.add_argument("--max-pages", type=int, default=2, help="страниц с одного файла")
     ap.add_argument("--vs-best", action="store_true", help="две панели: лучшее из старых Heron/dots | новый пайплайн")
+    ap.add_argument("--fused", action="store_true", help="одна картинка: Heron + dots + линии + чернила вместе")
     args = ap.parse_args(argv)
 
     files = sorted(p for i in args.inputs for p in ([i] if i.is_file() else i.iterdir()) if p.suffix.lower() in _SUFFIXES)
@@ -187,14 +199,17 @@ def main(argv: list[str] | None = None) -> int:
                 ).save(args.out / f"{stem}.png")
                 print(f"{key}: best old {row['best_old']} | new {row['fused']}", flush=True)
                 continue
-            pic = side_by_side(
-                side_by_side(
-                    _panel(page, heron, f"Heron+tiles: {len(heron)} regions, {row['heron']['tables']} tables, {heron_s:.1f} s"),
-                    _panel(page, dots, f"dots: {len(dots)} regions, {row['dots']['tables']} tables, {status}"),
-                ),
-                _panel(page, final, f"Fused: {row['fused']['tables']} tables ({len(ruled)} by lines), {row['fused']['text']} text"),
-            )
-            pic.save(args.out / f"{stem}.png")
+            if args.fused:
+                _fused_page(page, final).save(args.out / f"{stem}.png")
+            else:
+                pic = side_by_side(
+                    side_by_side(
+                        _panel(page, heron, f"Heron+tiles: {len(heron)} regions, {row['heron']['tables']} tables, {heron_s:.1f} s"),
+                        _panel(page, dots, f"dots: {len(dots)} regions, {row['dots']['tables']} tables, {status}"),
+                    ),
+                    _panel(page, final, f"Fused: {row['fused']['tables']} tables ({len(ruled)} by lines), {row['fused']['text']} text"),
+                )
+                pic.save(args.out / f"{stem}.png")
             print(f"{key}: heron {row['heron']} | dots {row['dots']} | lines {len(ruled)} | fused {row['fused']}", flush=True)
     (args.out / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
     (write_vs_best if args.vs_best else write_summary)(results, args.out / "summary.md")
