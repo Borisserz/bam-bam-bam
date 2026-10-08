@@ -23,7 +23,9 @@ def _inputs(paths: list[Path]) -> list[Path]:
 def _progress(report) -> None:
     where = f"waybill {report.doc}" if report.doc else "not a waybill"
     extra = f"; ERROR {report.error}" if report.error else (f"; copy of page {report.copy_of}" if report.copy_of else "")
-    print(f"  page {report.number}: {report.kind}, {where}; zones {report.zones}{extra}", flush=True)
+    orient = next((s for s in report.steps if s.startswith("orientation")), "")
+    print(f"  page {report.number}: {report.kind}, {where}; zones {report.zones}{extra}"
+          + (f"; {orient}" if orient else ""), flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:

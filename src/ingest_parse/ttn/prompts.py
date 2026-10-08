@@ -111,8 +111,8 @@ PAGE = (
 
 UPRIGHT = (
     "На картинке две копии одной страницы документа: слева A, справа B (B — та же страница, повёрнутая на 180°). "
-    "На какой копии текст читается нормально, а на какой он вверх ногами? Смотри на буквы и цифры, а не на рамки. "
-    'Ответь только JSON: {"upright": "A"} или {"upright": "B"}.'
+    "На какой копии текст читается нормально? Смотри на буквы и цифры, а не на рамки. "
+    "Ответь ОДНОЙ буквой и ничем больше: A или B."
 )
 
 
@@ -128,12 +128,15 @@ def parse_upright_answer(answer: str) -> int:
     if data and str(data.get("upright") or "").strip():
         return parse_upright(data)
     text = answer.upper().translate(str.maketrans({"В": "B", "А": "A"}))
-    named = re.findall(r"КОПИ\w*\s+([AB])", text)
+    bare = [ln.strip(" *_`.").strip() for ln in text.splitlines() if ln.strip()]
+    if bare and bare[-1] in ("A", "B"):  # «одной буквой», как просим
+        return 180 if bare[-1] == "B" else 0
+    named = re.findall(r"(?:КОПИ\w*|COPY|IMAGE)\s+([AB])", text)
 
     def upright_letter(letter: str) -> bool:
-        for m in re.finditer(rf"КОПИ\w*\s+{letter}", text):
-            window = text[m.start() : m.end() + 25]
-            if "НОГ" not in window and "ПЕРЕВЕР" not in window:
+        for m in re.finditer(rf"(?:КОПИ\w*|COPY|IMAGE)\s+{letter}", text):
+            window = text[m.start() : m.end() + 30]
+            if not any(w in window for w in ("НОГ", "ПЕРЕВЕР", "UPSIDE")):
                 return True
         return False
 

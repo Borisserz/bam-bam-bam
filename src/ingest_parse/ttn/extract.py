@@ -205,13 +205,15 @@ class _Asker:
         return data
 
 
-def _orient(asker: _Asker, name: str):
+def _orient(asker: _Asker, name: str, notes: list[str]):
     """VLM сравнивает страницу и её поворот на 180° (Heron для этого ненадёжен: разница уверенности ~0.05)."""
     from ingest_parse.ttn.preprocess import upright_pair
 
     def check(image: Image.Image) -> int:
-        answer = asker.text(upright_pair(image), prompts.UPRIGHT, name)
-        return prompts.parse_upright_answer(answer or "")
+        answer = asker.text(upright_pair(image), prompts.UPRIGHT, name) or ""
+        turn = prompts.parse_upright_answer(answer)
+        notes.append(f"orientation {turn}° ← {' '.join(answer.split())[:80] or 'no answer'}")
+        return turn
 
     return check
 
@@ -313,10 +315,11 @@ def extract_ttn(path: Path, out_dir: Path, options: TtnOptions) -> TtnResult:
     def process(page: Any, report: PageReport) -> None:
         n = page.number
         tag = f"page-{n:02d}"
-        check = _orient(asker, f"{tag}-orientation") if options.orientation and asker is not None else None
+        notes: list[str] = []
+        check = _orient(asker, f"{tag}-orientation", notes) if options.orientation and asker is not None else None
         prep = prepare(page.image, page.dpi, orient=check, denoise=options.denoise)
         image = prep.image
-        report.dpi, report.steps = prep.dpi, prep.steps
+        report.dpi, report.steps = prep.dpi, [*prep.steps, *notes]
         try:
             regions = ttn_layout(image, prep.stamps, heron=options.heron)
         except Exception as exc:  # noqa: BLE001 — модель раскладки не скачана / сбой Docling
