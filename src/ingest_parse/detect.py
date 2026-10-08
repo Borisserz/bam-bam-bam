@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-SupportedFormat = Literal["txt", "doc", "docx", "docm", "rtf", "pdf"]
+SupportedFormat = Literal["txt", "doc", "docx", "docm", "rtf", "pdf", "image"]
 
 _EXT_MAP: dict[str, SupportedFormat] = {
     ".txt": "txt",
@@ -14,6 +14,13 @@ _EXT_MAP: dict[str, SupportedFormat] = {
     ".docm": "docm",
     ".rtf": "rtf",
     ".pdf": "pdf",
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".tif": "image",
+    ".tiff": "image",
+    ".webp": "image",
+    ".bmp": "image",
 }
 
 
@@ -27,6 +34,6 @@ def detect_format(path: str | Path) -> SupportedFormat:
     if fmt is None:
         raise UnsupportedFormatError(
             f"Unsupported format '{suffix or '<none>'}' for {path!s}. "
-            "Supported: .txt, .doc, .docx, .docm, .rtf, .pdf"
+            "Supported: .txt, .doc, .docx, .docm, .rtf, .pdf, .png, .jpg, .jpeg, .tif, .tiff, .webp, .bmp"
         )
     return fmt

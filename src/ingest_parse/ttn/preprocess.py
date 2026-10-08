@@ -123,9 +123,21 @@ def _without_lines(ink: np.ndarray, part: int = 10) -> np.ndarray:
 
 
 def _rotate(img: np.ndarray, angle: float, fill: int = 0) -> np.ndarray:
+    """Поворот в том же кадре: так сравнивается наклон. Край картинки обрезается."""
     h, w = img.shape[:2]
     m = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
     return cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_LINEAR, borderValue=fill)
+
+
+def _unskew(img: np.ndarray, angle: float, fill: int = 0) -> np.ndarray:
+    """Тот же угол, но холст растёт: угол страницы и буквы у края не срезаются."""
+    h, w = img.shape[:2]
+    m = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+    cos, sin = abs(m[0, 0]), abs(m[0, 1])
+    nw, nh = int(h * sin + w * cos), int(h * cos + w * sin)
+    m[0, 2] += (nw - w) / 2
+    m[1, 2] += (nh - h) / 2
+    return cv2.warpAffine(img, m, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=fill)
 
 
 def _sharpness(ink: np.ndarray) -> float:
@@ -214,9 +226,9 @@ def prepare(
         out.steps.append("rotate 90° (sideways)")
     skew = detect_skew(gray)
     if abs(skew) >= 0.1:
-        gray = _rotate(gray, skew, fill=255)
-        marks = _rotate(marks, skew, fill=0) if marks is not None else None
-        pen = _rotate(pen, skew, fill=0) if pen is not None else None
+        gray = _unskew(gray, skew, fill=255)
+        marks = _unskew(marks, skew, fill=0) if marks is not None else None
+        pen = _unskew(pen, skew, fill=0) if pen is not None else None
         out.skew = skew
         out.steps.append(f"deskew {skew:+.2f}°")
     gray = normalize_light(gray, out.dpi)

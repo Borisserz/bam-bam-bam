@@ -111,6 +111,13 @@ def _parse_path(path: Path, media: MediaWriter | None, scan: ScanOptions) -> str
         return _docx_to_markdown(path, media)
     if fmt == "pdf":
         return _pdf_to_markdown(path, media, scan)
+    if fmt == "image":
+        with tempfile.TemporaryDirectory(prefix="ingest-parse-scan-", ignore_cleanup_errors=True) as tmp:
+            from ingest_parse.scan_input import write_scan_pdf
+
+            pdf = Path(tmp) / f"{path.stem}.pdf"
+            write_scan_pdf(path, pdf)
+            return _pdf_to_markdown(pdf, media, scan)
     with tempfile.TemporaryDirectory(prefix="ingest-parse-doc-", ignore_cleanup_errors=True) as tmp:
         convert = docm_to_docx if fmt == "docm" else convert_doc_to_docx
         return _docx_to_markdown(convert(path, output_dir=tmp), media)
