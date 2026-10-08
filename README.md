@@ -1,63 +1,38 @@
 # ingest-parse
 
-Heron + dots + линии таблиц + чернила, и страница уходит в Qwen (image-to-text).
-Адрес dots подставь свой. `id` модели — из второй команды, не из названия файла.
-В консоли на каждой странице строка `page N: dots ...`. Текст — `out\scan.md`, рамки — `out\media\123\debug\`.
+Ветка одна: `main`. Сначала адреса (один раз в этом окне PowerShell), потом одна из двух команд.
+`SCAN_DOTS_URL` — адрес, который дали для dots. Имя модели берётся само, из `/v1/models`, не из названия файла.
 
 ```powershell
+git checkout main
 git pull
+uv sync
 Remove-Item Env:VISION_API_KEY, Env:VISION_MODEL -ErrorAction SilentlyContinue
 $env:VISION_API_BASE_URL = "http://192.168.4.101:8080"
 $env:INGEST_VISION_MAX_LONG_EDGE = "2560"
 $env:INGEST_VISION_REASONING = "off"
 $env:SCAN_DOTS_URL = "http://АДРЕС:ПОРТ"
-(Invoke-RestMethod "$env:SCAN_DOTS_URL/v1/models").data.id
-$env:SCAN_DOTS_MODEL = "<id из строки выше>"
+$env:SCAN_DOTS_MODEL = @((Invoke-RestMethod "$env:SCAN_DOTS_URL/v1/models").data.id)[0]
+```
+
+Весь пайплайн: Heron + dots + линии таблиц + чернила, затем Qwen. Текст — `out\scan.md`, рамки — `out\media\123\debug\`.
+В консоли на странице: `page N: dots ...` и, если нашлась синяя или фиолетовая ручка, `page N: pen lines=K`.
+
+```powershell
 uv run ingest-parse 123.pdf -o out\scan.md --scan-layout --vision
 ```
 
-## Быстрый старт: накладные ТН-2 / ТТН-1 на рабочем ПК (PowerShell)
+Только разметка, без модели. Те же рамки в `out\media\123\debug\`.
 
-1. Обновить зависимости (~1 мин):
+```powershell
+uv run ingest-parse 123.pdf -o out\layout.md --scan-layout
+```
 
-   ```powershell
-   uv sync
-   ```
+При первом PDF Heron качает веса. Если `heron failed` и нет интернета:
 
-2. Адрес модели и настройки:
-
-   ```powershell
-   Remove-Item Env:VISION_API_KEY, Env:VISION_MODEL -ErrorAction SilentlyContinue
-   $env:VISION_API_BASE_URL = "http://192.168.4.101:8080"   # Qwen в LAN, без ключа и без имени модели
-   $env:INGEST_VISION_MAX_LONG_EDGE = "2560"
-   $env:INGEST_VISION_REASONING = "off"
-   ```
-
-3. Проверить разметку без модели (~30 с):
-
-   ```powershell
-   uv run ingest-ttn D:\scans\ttn\один.pdf -o out\test --no-vision
-   ```
-
-   При первом запуске Heron скачает веса (~200 МБ). Открыть `out\test\<имя>\page-01-layout.png`: красные рамки —
-   текст, зелёные — таблицы, синие — картинки. В консоли `heron failed` — нет интернета; тогда скачать модели и повторить шаг:
-
-   ```powershell
-   uv run docling-tools models download -o C:\docling-models; $env:DOCLING_ARTIFACTS_PATH = "C:\docling-models"
-   ```
-
-4. Полный прогон с моделью:
-
-   ```powershell
-   uv run ingest-ttn D:\scans\ttn -o out\ttn
-   ```
-
-   По каждому файлу — `OK` или `CHECK: N errors`; результаты в `out\ttn\<имя>.ttn.md` и `.ttn.json`.
-
-5. Если что-то не так: HTTP 400/413 — `$env:INGEST_VISION_MAX_LONG_EDGE = "2048"`; таймауты —
-   `$env:INGEST_VISION_TIMEOUT_S = "600"`.
-
-dots для накладных не нужна: `ingest-ttn` размечает Heron + линии бланка + добор чернил.
+```powershell
+uv run docling-tools models download -o C:\docling-models; $env:DOCLING_ARTIFACTS_PATH = "C:\docling-models"
+```
 
 `.txt` / `.doc` / `.docx` / `.docm` / `.rtf` / `.pdf` → **Markdown-строка** для RAG (chunking, embeddings,
 цитирование) + папка `media/` с картинками. DOCX и PDF разбирает [Docling](https://github.com/docling-project/docling)
@@ -326,8 +301,7 @@ PNG: повторный запуск не спрашивает API (`--vision-fo
 Настройка (PowerShell):
 
 ```powershell
-$env:VISION_API_BASE_URL = "http://localhost:8080"        # на рабочем ПК, где запущена модель
-# $env:VISION_API_BASE_URL = "http://192.168.4.101:8080"  # с других машин в LAN
+$env:VISION_API_BASE_URL = "http://192.168.4.101:8080"
 uv run ingest-parse report.docx -o out\report.md --vision
 ```
 
@@ -338,7 +312,7 @@ set VISION_API_BASE_URL=http://192.168.4.101:8080
 uv run ingest-parse report.docx -o out\report.md --vision
 ```
 
-Проверка сервера: `curl http://localhost:8080/v1/models`.
+Проверка сервера: `curl http://192.168.4.101:8080/v1/models`.
 
 | Переменная | По умолчанию | Смысл |
 |---|---|---|
@@ -405,12 +379,10 @@ uv run ingest-parse report.docx -o out\report.md --media-dir D:\m
 
 **4. Модель (VLM): сканы PDF и описания картинок**
 
+Адреса и две команды скана — в начале файла. Ниже — тот же Qwen для картинок в docx.
+
 ```powershell
-curl.exe http://localhost:8080/v1/models                  # сервер модели жив?
-$env:VISION_API_BASE_URL = "http://localhost:8080"        # на ПК с моделью
-# $env:VISION_API_BASE_URL = "http://192.168.4.101:8080"  # с другой машины в LAN
-uv run ingest-parse scan.pdf -o out\scan.md --vision      # сканы → текст, картинки → описания
-uv run ingest-parse scan.pdf -o out\scan.md --vision-force  # мимо кэша .vision-cache
+uv run ingest-parse report.docx -o out\report.md --vision
 ```
 
 **5. Вся папка**
@@ -439,9 +411,7 @@ uv run ingest-parse scan.pdf -o out\scan_vision.md --vision   # через мо�
 uv run python scripts\heron_raw.py scan.pdf out\heron     # что нашёл Heron: регионы в консоли,
                                                           # out\heron\page-NNN-heron.png с рамками, docling.md
 
-# разметка (--scan-layout): Heron + линии бланка (+ dots), рисунки и таблицы уходят в модель вырезами
-uv run ingest-parse scan.pdf -o out\scan_layout.md --scan-layout            # только Heron, без модели
-uv run ingest-parse scan.pdf -o out\scan_layout.md --scan-layout --vision   # Heron + модель
+# скан накладной — две команды в начале README (с моделью и только разметка)
 ```
 
 Что смотреть после `--scan-layout` (папка `out\media\scan\debug\`):
@@ -483,14 +453,8 @@ Heron уверен (≥ 0.5) и на скане внутри есть верти
 3+ текстовых блока, выбрасывается (это рамка скана, а не рисунок). На 22 открытых ТН/ТТН: лучшая из моделей
 по отдельности нашла 36 таблиц, слияние — 62 (`scripts/compare_layout.py … --vs-best`).
 
-```powershell
-$env:SCAN_DOTS_URL = "http://192.168.4.101:8091"            # сервер dots (OpenAI-совместимый API)
-$env:SCAN_DOTS_MODEL = "<имя из GET /v1/models>"            # по умолчанию mlx-community/dots.mocr-8bit
-uv run ingest-parse scan.pdf -o out\scan_layout.md --scan-layout --vision
-```
-
-Без `SCAN_DOTS_URL` работают Heron, линии и добор чернил. Сервер dots недоступен — предупреждение
-`dots layout failed`, страница идёт без dots.
+Адрес dots и имя модели задаются в блоке в начале README. Без `SCAN_DOTS_URL` работают Heron, линии и добор чернил.
+Сервер dots недоступен — предупреждение `dots layout failed`, страница идёт без dots.
 
 **7. Накладные ТН-2 / ТТН-1 (Беларусь): `ingest-ttn`**
 
@@ -498,15 +462,10 @@ uv run ingest-parse scan.pdf -o out\scan_layout.md --scan-layout --vision
 быть пачкой: несколько накладных, обороты, письма, приложения — каждая лицевая страница начинает новую накладную,
 продолжения и приложения с таблицей добавляются к ней, оборот и письма переписываются в Markdown целиком.
 
-```powershell
-uv sync                                                    # после git pull: появится команда ingest-ttn
-$env:VISION_API_BASE_URL = "http://localhost:8080"
-$env:INGEST_VISION_MAX_LONG_EDGE = "2560"                  # таблица ТТН широкая: меньше ужатия; сервер должен принять
+Скан накладной с dots и Qwen — команды в начале README. `ingest-ttn` — отдельный разбор полей в JSON, без dots.
 
-uv run ingest-ttn ttn.pdf -o out\ttn                       # один файл
-uv run ingest-ttn D:\scans\ttn -o out\ttn                  # вся папка (рекурсивно)
-uv run ingest-ttn ttn.pdf -o out\ttn --no-vision           # без модели: только предобработка и зоны
-uv run ingest-ttn ttn.pdf -o out\ttn --vision-force        # переспросить модель мимо кэша
+```powershell
+uv run ingest-ttn ttn.pdf -o out\ttn
 ```
 
 В консоли — строка на каждую страницу (`page 3: back, waybill 1; zones layout`), затем по файлу: `OK`
@@ -552,8 +511,8 @@ uv run pytest -q tests\test_ttn.py                        # только нак�
 | `LibreOfficeNotFoundError` | `$env:LIBREOFFICE_PATH = "D:\Apps\LibreOffice\program\soffice.exe"` |
 | ошибка загрузки с `huggingface.co` | скопировать кэш моделей (блок 2) |
 | `No module named cv2` | `uv sync --reinstall-package opencv-python-headless` |
-| `error: Vision API is not configured`, код 2 | задать `VISION_API_BASE_URL` (блок 4) |
-| `reason="vision_error"` в блоке скана | `curl.exe http://localhost:8080/v1/models`, перезапустить с `--vision` |
+| `error: Vision API is not configured`, код 2 | задать `VISION_API_BASE_URL` (блок в начале README) |
+| `reason="vision_error"` в блоке скана | `curl.exe http://192.168.4.101:8080/v1/models`, перезапустить команду из начала README |
 | кракозябры в консоли | писать в файл через `-o`, stdout всегда UTF-8 |
 | `ingest-ttn`: `CHECK` на хорошем скане | прогнать с `--debug`, открыть `page-NN-zones.png`: найдена ли таблица и строки; затем `.ttn.md` → «Проверки» |
 | `ingest-ttn`: HTTP 400/413 от модели | сервер не принимает большие картинки: `$env:INGEST_VISION_MAX_LONG_EDGE = "2048"` |
@@ -562,7 +521,7 @@ uv run pytest -q tests\test_ttn.py                        # только нак�
 ## Не делает (осознанно)
 
 - OCR (Tesseract, RapidOCR, `do_ocr` Docling) — сканы читает только VLM; ColPali (поиск по картинкам страниц —
-  отдельная задача); PyMuPDF; Marker / MinerU; рукопись;
+  отдельная задача); PyMuPDF; Marker / MinerU; чёрная ручка на сером скане (синяя и фиолетовая читается отдельным вырезом);
 - схемы → текст/Mermaid (только картинка страницы + опционально описание VLM);
 - сноски, колонтитулы;
 - номера списков, набранные полями `SEQ` / `LISTNUM`, и нумерация внутри надписей схем;
