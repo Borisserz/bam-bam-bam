@@ -11,7 +11,7 @@
 2. Адрес модели и настройки:
 
    ```powershell
-   $env:VISION_API_BASE_URL = "http://192.168.4.103:9595"   # Open WebUI
+   $env:VISION_API_BASE_URL = "http://192.168.4.103:9595/api"   # Open WebUI: /api, не корень сайта
    $env:VISION_API_KEY = "<токен JWT из настроек Open WebUI>"
    $env:VISION_MODEL = "Qwen3.6 35B-A3B UD-Q4_K_M (MoE, CPU offload)"
    $env:INGEST_VISION_MAX_LONG_EDGE = "2560"
