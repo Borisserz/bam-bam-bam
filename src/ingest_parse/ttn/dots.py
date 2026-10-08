@@ -19,10 +19,18 @@ from PIL import Image
 from ingest_parse.ttn.layout import Det, area, merge_tiles, role
 
 PROMPT = (
-    "Please output the layout information from this PDF image, including each layout's bbox and its category. "
-    "The bbox should be in the format [x1, y1, x2, y2]. The layout categories for the PDF document include "
-    "['Caption', 'Footnote', 'Formula', 'List-item', 'Page-footer', 'Page-header', 'Picture', 'Section-header', "
-    "'Table', 'Text', 'Title']. Do not output the corresponding text. The layout result should be in JSON format."
+    "Please output the layout information from this PDF image, including each layout element's bbox, "
+    "its category, and the corresponding text content within the bbox.\n"
+    "1. Bbox format: [x1, y1, x2, y2].\n"
+    "2. Layout Categories: ['Caption', 'Footnote', 'Formula', 'List-item', 'Page-footer', 'Page-header', "
+    "'Picture', 'Section-header', 'Table', 'Text', 'Title'].\n"
+    "3. Text Extraction & Formatting Rules:\n"
+    "    - Picture: omit the text field.\n"
+    "    - Formula: text as LaTeX.\n"
+    "    - Table: text as HTML.\n"
+    "    - All others: text as Markdown.\n"
+    "4. Constraints: original text from the image, no translation. Sort elements in reading order.\n"
+    "5. Final Output: one JSON list."
 )
 LONG_EDGE = 1600  # 2240 вдвое медленнее и схлопывается чаще
 _ITEM = re.compile(r'\{\s*"bbox"\s*:\s*\[([\d.,\s]+)\]\s*,\s*"category"\s*:\s*"([^"]+)"')
@@ -71,14 +79,20 @@ def parse_dots(answer: str, size: tuple[int, int], long_edge: int) -> tuple[list
         items = raw if isinstance(raw, list) else raw.get("layout") or raw.get("elements") or next(
             (v for v in raw.values() if isinstance(v, list)), []
         )
-        found = [(str(it["category"]), [float(v) for v in it["bbox"]]) for it in items]
+        found = [
+            (str(it["category"]), [float(v) for v in it["bbox"]], str(it.get("text") or "").strip())
+            for it in items
+        ]
     except (ValueError, KeyError, TypeError, AttributeError):
-        found = [(cat, [float(v) for v in nums.split(",") if v.strip()][:4]) for nums, cat in _ITEM.findall(answer)]
+        found = [
+            (cat, [float(v) for v in nums.split(",") if v.strip()][:4], "")
+            for nums, cat in _ITEM.findall(answer)
+        ]
         status = "salvaged" if found else "invalid"
     fx, fy = size[0] / sw, size[1] / sh
     dets = [
-        Det(role(cat), 1.0, (round(b[0] * fx), round(b[1] * fy), round(b[2] * fx), round(b[3] * fy)), "dots", cat)
-        for cat, b in found
+        Det(role(cat), 1.0, (round(b[0] * fx), round(b[1] * fy), round(b[2] * fx), round(b[3] * fy)), "dots", cat, text)
+        for cat, b, text in found
         if len(b) == 4
     ]
     if any(d.role != "table" and area(d.box) > _COLLAPSED * size[0] * size[1] for d in dets):
@@ -109,7 +123,17 @@ def dots_layout(image: Image.Image, send: Send, long_edge: int = LONG_EDGE) -> t
     return merge_tiles([], tiles, (w, h), stitch=True), "halves"
 
 
-def http_sender(url: str, model: str, max_tokens: int = 3000, timeout: float = 600) -> Send:
+def page_text(dets: list[Det]) -> str:
+    """Буквы dots сверху вниз: картинки без подписи пропускаются."""
+    parts = [
+        d.text.strip()
+        for d in sorted(dets, key=lambda d: (d.box[1], d.box[0]))
+        if d.role != "picture" and d.text.strip()
+    ]
+    return "\n\n".join(parts)
+
+
+def http_sender(url: str, model: str, max_tokens: int = 8192, timeout: float = 600) -> Send:
     def send(image: Image.Image, prompt: str) -> str:
         buf = io.BytesIO()
         image.save(buf, format="PNG")

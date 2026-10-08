@@ -17,7 +17,7 @@ uv sync
 uv run ingest-parse 123.pdf -o out\scan.md --scan-layout --vision
 ```
 
-Только разметка, без модели. Те же рамки в `out\media\123\debug\`.
+Только разметка, без Qwen. Те же рамки в `out\media\123\debug\`. Если dots отвечает, буквы страницы попадают в `out\layout.md` (в консоли `chars=`).
 
 ```powershell
 uv run ingest-parse 123.pdf -o out\layout.md --scan-layout

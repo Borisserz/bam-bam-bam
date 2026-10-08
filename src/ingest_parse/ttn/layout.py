@@ -33,6 +33,7 @@ class Det:
     box: Box
     source: str  # heron | dots | lines
     label: str = ""
+    text: str = ""  # буквы блока, если источник их вернул (dots)
 
 
 def role(label: str) -> str:
@@ -375,7 +376,10 @@ def merge_tiles(
             xs = min(a.box[2], b.box[2]) - max(a.box[0], b.box[0])
             if i not in used and a.role == b.role and xs >= 0.6 * max(a.box[2] - a.box[0], b.box[2] - b.box[0]) and b.box[1] <= a.box[3]:
                 box = (min(a.box[0], b.box[0]), a.box[1], max(a.box[2], b.box[2]), b.box[3])
-                pool.append(Det(a.role, min(a.score, b.score), box, a.source, a.label))
+                pool.append(Det(
+                    a.role, min(a.score, b.score), box, a.source, a.label,
+                    "\n\n".join(part for part in (a.text, b.text) if part.strip()),
+                ))
                 used.add(i)
                 break
         else:

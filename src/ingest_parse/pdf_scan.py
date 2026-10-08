@@ -173,15 +173,17 @@ def _load(pdf: Any, number: int, options: ScanOptions, work: Path, cache_dir: Pa
     return _Page(prep.image, prep.dpi, prep.steps, prep.stamps, prep.pen)
 
 
-def _regions(page: _Page, number: int, options: ScanOptions) -> list[Region] | None:
-    """Итоговая разметка: Heron (страница + половины), dots (если есть), сетка линий бланка, добор чернил."""
+def _regions(page: _Page, number: int, options: ScanOptions) -> tuple[list[Region] | None, str]:
+    """Итоговая разметка и текст dots. Heron упал — рамок нет, буквы dots всё равно возвращаются."""
+    from ingest_parse.ttn.dots import page_text
     from ingest_parse.ttn.layout import fuse, heron_layout, ruled_tables
 
+    heron_ok = True
     try:
         heron = heron_layout(page.image)
     except Exception as exc:  # модель не скачана, сбой Docling — страница идёт без раскладки
         warnings.warn(f"heron layout failed: {exc}; page {number} goes without layout", PdfPageWarning, stacklevel=4)
-        return None
+        heron, heron_ok = [], False
     dots = []
     if options.dots is None:
         print(f"  page {number}: dots off (SCAN_DOTS_URL is empty)", flush=True)
@@ -191,14 +193,21 @@ def _regions(page: _Page, number: int, options: ScanOptions) -> list[Region] | N
         try:
             dots, status = dots_layout(page.image, options.dots)
             tables = sum(d.role == "table" for d in dots)
-            print(f"  page {number}: dots {status}; regions={len(dots)}; tables={tables}", flush=True)
+            print(
+                f"  page {number}: dots {status}; regions={len(dots)}; tables={tables}; chars={sum(len(d.text) for d in dots)}",
+                flush=True,
+            )
         except Exception as exc:  # сервер dots недоступен — хватит Heron и линий
             print(f"  page {number}: dots FAILED {type(exc).__name__}: {exc}", flush=True)
             warnings.warn(f"dots layout failed: {exc}; page {number} uses heron + lines", PdfPageWarning, stacklevel=4)
+    text = page_text(dots)
+    if not heron_ok:
+        return None, text
     from ingest_parse.ttn.preprocess import without_stamps
 
     gray = without_stamps(np.asarray(page.image.convert("L"), dtype=np.uint8), page.stamps)
-    return [Region(_label(d), d.score, d.box) for d in fuse(page.image.size, heron, dots, ruled_tables(gray), gray)]
+    regions = [Region(_label(d), d.score, d.box) for d in fuse(page.image.size, heron, dots, ruled_tables(gray), gray)]
+    return regions, text
 
 
 def _label(d: Any) -> str:
@@ -223,8 +232,9 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
 
     plan = None
+    ocr = ""
     if options.layout:
-        regions = _regions(page, number, options)
+        regions, ocr = _regions(page, number, options)
         plan = _plan(regions, image.size) if regions is not None else None
     if plan is not None:
         masked = _masked(image, plan, page.dpi)
@@ -232,6 +242,9 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
             _save_debug(media, number, page, masked, plan)
 
     if options.client is None:
+        if ocr.strip():
+            _warn(number, "rendered + dots text")
+            return _block(number, sha, ocr.strip(), {}, link, "dots.mocr", plan is not None)
         return _failure(number, "vision_off", "", link)
     from ingest_parse.vision import VisionError
 
