@@ -1,18 +1,12 @@
 # ingest-parse
 
-Ветка одна: `main`. Сначала адреса (один раз в этом окне PowerShell), потом одна из двух команд.
-`SCAN_DOTS_URL` — адрес, который дали для dots. Имя модели берётся само, из `/v1/models`, не из названия файла.
+Ветка одна: `main`. Адреса лежат в `scan.env` в папке проекта: Qwen уже вписан.
+Один раз впиши туда `SCAN_DOTS_URL` (адрес dots). В консоль переменные писать не нужно.
 
 ```powershell
 git checkout main
 git pull
 uv sync
-Remove-Item Env:VISION_API_KEY, Env:VISION_MODEL -ErrorAction SilentlyContinue
-$env:VISION_API_BASE_URL = "http://192.168.4.101:8080"
-$env:INGEST_VISION_MAX_LONG_EDGE = "2560"
-$env:INGEST_VISION_REASONING = "off"
-$env:SCAN_DOTS_URL = "http://АДРЕС:ПОРТ"
-$env:SCAN_DOTS_MODEL = @((Invoke-RestMethod "$env:SCAN_DOTS_URL/v1/models").data.id)[0]
 ```
 
 Весь пайплайн: Heron + dots + линии таблиц + чернила, затем Qwen. Текст — `out\scan.md`, рамки — `out\media\123\debug\`.

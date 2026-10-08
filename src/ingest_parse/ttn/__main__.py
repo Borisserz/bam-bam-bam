@@ -29,6 +29,9 @@ def _progress(report) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from ingest_parse.envfile import load_scan_env
+
+    load_scan_env()
     p = argparse.ArgumentParser(prog="ingest-ttn", description="ТН-2 / ТТН-1 (Беларусь): PDF-скан → JSON + Markdown.")
     p.add_argument("paths", type=Path, nargs="+", help="PDF files or folders (recursively)")
     p.add_argument("-o", "--output", type=Path, default=Path("out_ttn"), help="Output folder (default: out_ttn)")

@@ -13,6 +13,9 @@ from ingest_parse.pdf_triage import PdfPageWarning
 
 
 def main(argv: list[str] | None = None) -> int:
+    from ingest_parse.envfile import load_scan_env
+
+    load_scan_env()
     p = argparse.ArgumentParser(
         prog="ingest-parse",
         description="Parse txt/doc/docx/docm/rtf/pdf into Markdown (pdf scans: text via --vision).",
