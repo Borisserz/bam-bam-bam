@@ -13,9 +13,10 @@
    ```powershell
    $env:VISION_API_BASE_URL = "http://192.168.4.103:9595/api"   # Open WebUI: /api, не корень сайта
    $env:VISION_API_KEY = "<токен JWT из настроек Open WebUI>"
-   $env:VISION_MODEL = "Qwen3.6 35B-A3B UD-Q4_K_M (MoE, CPU offload)"
+   $env:VISION_MODEL = "<id из команды ниже>"          # имя в чате сервер не принимает
    $env:INGEST_VISION_MAX_LONG_EDGE = "2560"
    $env:INGEST_VISION_REASONING = "low"                 # маленькое размышление
+   (Invoke-RestMethod -Headers @{Authorization="Bearer $env:VISION_API_KEY"} http://192.168.4.103:9595/api/v1/models).data.id
    ```
 
 3. Проверить разметку без модели (~30 с):
