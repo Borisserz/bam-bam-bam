@@ -15,7 +15,7 @@
    $env:VISION_API_KEY = "<токен JWT из настроек Open WebUI>"
    $env:VISION_MODEL = "Qwen3.6 35B-A3B UD-Q4_K_M (MoE, CPU offload)"
    $env:INGEST_VISION_MAX_LONG_EDGE = "2560"
-   $env:INGEST_VISION_REASONING = "off"                 # отвечает быстрее
+   $env:INGEST_VISION_REASONING = "low"                 # маленькое размышление
    ```
 
 3. Проверить разметку без модели (~30 с):
