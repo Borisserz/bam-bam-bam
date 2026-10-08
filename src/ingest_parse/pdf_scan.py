@@ -132,16 +132,20 @@ def _vision(
 def _orienter(options: ScanOptions, number: int, work: Path, cache_dir: Path):
     """VLM сравнивает страницу и её поворот на 180° (A/B) и говорит, где текст не вверх ногами; сбой — не крутим."""
     from ingest_parse.ttn.preprocess import upright_pair
-    from ingest_parse.ttn.prompts import UPRIGHT, parse_json, parse_upright
+    from ingest_parse.ttn.prompts import UPRIGHT, parse_upright_answer
     from ingest_parse.vision import VisionError
 
     def ask(image: Any) -> int:
         path = work / f"scan-{number:03d}-upright.png"
         upright_pair(image).save(path)
         try:
-            return parse_upright(parse_json(_complete(path, UPRIGHT, "upright", options, cache_dir)))
-        except VisionError:
+            answer = _complete(path, UPRIGHT, "upright", options, cache_dir)
+        except VisionError as exc:
+            print(f"  page {number}: orientation failed: {exc}", flush=True)
             return 0
+        turn = parse_upright_answer(answer)
+        print(f"  page {number}: orientation {turn}° ← {' '.join(answer.split())[:80]}", flush=True)
+        return turn
 
     return ask
 
