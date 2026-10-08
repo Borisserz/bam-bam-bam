@@ -50,14 +50,20 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Optional local Chandra 2 markdown hint for Qwen (SCAN_CHANDRA_URL). Off by default.",
     )
+    p.add_argument(
+        "--olm",
+        action="store_true",
+        help="Optional local olmOCR markdown hint for Qwen (SCAN_OLM_URL). Off by default. Do not combine with --chandra.",
+    )
     args = p.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):  # Windows: вывод в файл идёт в cp1251 — символ вне кодировки не роняет запуск
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
 
-    from ingest_parse.letters import set_chandra
+    from ingest_parse.letters import set_chandra, set_olm
 
     set_chandra(args.chandra)
+    set_olm(args.olm)
 
     vision = args.vision or args.vision_force
     if vision:

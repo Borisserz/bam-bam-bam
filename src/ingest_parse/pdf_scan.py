@@ -251,10 +251,14 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
             _warn(number, "rendered + dots text")
             return _block(number, sha, ocr.strip(), {}, link, "dots.mocr", plan is not None)
         return _failure(number, "vision_off", "", link)
-    from ingest_parse.letters import page_hint
+    from ingest_parse.letters import load_letters
     from ingest_parse.vision import VisionError
 
-    letters = page_hint("", page.color or page.image)
+    letters = load_letters(page.color or page.image)
+    if media is not None and letters.source:
+        path = media.directory / f"debug/scan-{number:03d}-{letters.source}.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(letters.dump(), encoding="utf-8")
     hands = [
         (Region("hand", 1.0, box), f"hand {i}") for i, box in enumerate(page.pen or [], 1)
     ]
@@ -266,7 +270,7 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
     crops = [(use, r) for r, use in plan or [] if use.startswith(("figure ", "table "))]
     try:
         if plan is None and not hands:
-            sections = _vision(path, number, options, cache_dir=path.parent, letters=letters)
+            sections = _vision(path, number, options, cache_dir=path.parent, letters=letters.for_box(None))
         else:
             sections = _page_text(
                 masked, plan or hands, number, options, tmp, path.parent, markers=bool(crops or hands), letters=letters,
@@ -278,7 +282,7 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
     if crops:
         parts.update(_crop_parts(page, number, crops, media, tmp, options, letters))
     if hands:
-        parts.update(_hand_parts(page, number, hands, media, tmp, options, path.parent))
+        parts.update(_hand_parts(page, number, hands, media, tmp, options, path.parent, letters))
     if parts:
         body = _merge(body, parts)
     if not (body or sections):
@@ -289,7 +293,7 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
 
 def _page_text(
     masked: Any, plan: list[tuple[Region, str]], number: int, options: ScanOptions, tmp: Path, cache_dir: Path,
-    *, markers: bool, letters: str = "",
+    *, markers: bool, letters: Any = None,
 ) -> dict[str, str]:
     """Текст закрашенной страницы; высокая страница — полосами, разрезы только между областями Heron."""
     bands = _bands(masked, plan, options.max_long_edge)
@@ -300,7 +304,10 @@ def _page_text(
         masked.crop((0, top, masked.width, bottom)).save(path)
         part = (i, len(bands)) if len(bands) > 1 else None
         mode = "page_layout" if part is None else "page_band"
-        got = _vision(path, number, options, mode=mode, markers=markers, part=part, cache_dir=cache_dir, letters=letters)
+        band = letters.for_box((0, top, masked.width, bottom)) if letters is not None else ""
+        got = _vision(
+            path, number, options, mode=mode, markers=markers, part=part, cache_dir=cache_dir, letters=band,
+        )
         texts.append(got.pop(_TEXT, "").strip())
         for key, value in got.items():
             sections.setdefault(key, value)
@@ -459,12 +466,11 @@ def _save(image: Any, name: str, media: MediaWriter | None, tmp: Path) -> tuple[
 
 def _hand_parts(
     page: _Page, number: int, hands: list[tuple[Region, str]], media: MediaWriter | None, tmp: Path,
-    options: ScanOptions, cache_dir: Path,
+    options: ScanOptions, cache_dir: Path, letters: Any = None,
 ) -> dict[str, str]:
     """Каждая полоса ручки — отдельный увеличенный вырез, чтобы буквы читались крупнее."""
+    from ingest_parse.ttn.prompts import with_text_layer
     from ingest_parse.vision.prompts import build_hand_prompt
-
-    prompt = build_hand_prompt()
     parts = {}
     source = page.color if page.color is not None else page.image
     pad = _PAD_PT * page.dpi / 72
@@ -480,6 +486,7 @@ def _hand_parts(
         else:
             path = tmp / f"scan-{number:03d}-hand-{k}.png"
             crop.save(path)
+        prompt = with_text_layer(build_hand_prompt(), letters.for_box(box) if letters is not None else "")
         text = _complete(path, prompt, "hand", options, cache_dir).strip()
         print(
             f"  page {number}: pen {k} box={box} crop={crop.size[0]}x{crop.size[1]} chars={len(text)}",
@@ -491,7 +498,7 @@ def _hand_parts(
 
 def _crop_parts(
     page: _Page, number: int, crops: list[tuple[str, Region]], media: MediaWriter | None, tmp: Path,
-    options: ScanOptions, letters: str = "",
+    options: ScanOptions, letters: Any = None,
 ) -> dict[str, str]:
     """{"TABLE 1": Markdown-таблица, "FIGURE 1": vision-блок + ссылка}; вырезы — с выровненной страницы."""
     parts = {}
@@ -619,7 +626,7 @@ def _read_table(
 
 def _table(
     page: _Page, box: tuple[int, int, int, int], k: int, number: int, media: MediaWriter | None, tmp: Path,
-    options: ScanOptions, letters: str = "",
+    options: ScanOptions, letters: Any = None,
 ) -> str:
     """Таблица: ≤ 10 строк — один вырез; длиннее — куски по строкам, у каждого сверху шапка таблицы."""
     from ingest_parse.ttn.prompts import grid_hint
@@ -627,28 +634,35 @@ def _table(
 
     zones = table_zones(page.image, box)
     tall = len(zones.rows) > _MAX_ROWS or (not zones.rows and box[3] - box[1] > _TILE_HEIGHT)
-    pieces = [c.image for c in table_chunks(page.image, zones, _MAX_ROWS)] if tall else [with_grid(page.image, zones).crop(box)]
+    if tall:
+        spans = []
+        for chunk in table_chunks(page.image, zones, _MAX_ROWS):
+            region = (box[0], chunk.rows[0][0], box[2], chunk.rows[-1][1]) if chunk.rows else box
+            spans.append((chunk.image, region))
+    else:
+        spans = [(with_grid(page.image, zones).crop(box), box)]
     hint = grid_hint(len(zones.columns) - 1)
     alt = f"Таблица {k}, страница {number}"
     texts, misses = [], []
-    for j, piece in enumerate(pieces, 1):
-        name = f"scan-{number:03d}-table-{k}.png" if len(pieces) == 1 else f"scan-{number:03d}-table-{k}-{j}.png"
+    for j, (piece, region) in enumerate(spans, 1):
+        name = f"scan-{number:03d}-table-{k}.png" if len(spans) == 1 else f"scan-{number:03d}-table-{k}-{j}.png"
         path, link = _save(piece, name, media, tmp)
-        kind, mode = ("table_scan", "table_extract") if len(pieces) == 1 else ("table_tile", "table_tile")
-        text, reason = _read_table(path, number, options, kind, mode, tmp, hint, letters)
+        kind, mode = ("table_scan", "table_extract") if len(spans) == 1 else ("table_tile", "table_tile")
+        local = letters.for_box(region) if letters is not None else ""
+        text, reason = _read_table(path, number, options, kind, mode, tmp, hint, local)
         if text:
             texts.append(text)
         else:
-            part = "" if len(pieces) == 1 else f" part {j}"
+            part = "" if len(spans) == 1 else f" part {j}"
             warnings.warn(
                 f"pdf page {number}: table {k}{part} not extracted: {reason}; image link emitted",
                 PdfPageWarning,
                 stacklevel=4,
             )
-            label = alt if len(pieces) == 1 else f"{alt}, часть {j}"
+            label = alt if len(spans) == 1 else f"{alt}, часть {j}"
             misses.append(image_markdown(label, link) if link is not None else f"<!-- {label}: not extracted -->")
     print(
-        f"  page {number}: table {k} pieces={len(pieces)} chars={sum(len(t) for t in texts)} misses={len(misses)}",
+        f"  page {number}: table {k} pieces={len(spans)} chars={sum(len(t) for t in texts)} misses={len(misses)}",
         flush=True,
     )
     out = [_join_tables(texts)] if texts else []

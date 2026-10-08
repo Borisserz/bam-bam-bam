@@ -12,20 +12,39 @@ uv sync
 Весь пайплайн: Heron + dots + линии таблиц + чернила, затем Qwen. Текст — `out\scan.md`, рамки — `out\media\123\debug\`.
 Тот же запуск для `.pdf`, `.jpg`, `.jpeg`, `.png`, `.tif`, `.tiff`, `.webp`, `.bmp`: поворот из телефона (EXIF) применяется сам, лист не раздувается из‑за ложных 72 dpi.
 В консоли на странице: `preprocess`, `dots`, `pen lines=K`, для каждой полосы ручки `pen K box= crop= chars=`, для таблицы `table K pieces= chars=`.
+Chandra и olmOCR выключены, пока флага нет. Буквы Dots в промпт Qwen не входят.
+
+Четыре прогона. Папки разные, чтобы в приватном репозитории лежали все четыре. Сравниваем итоговые `md`.
+
+1. Как есть, без OCR-подсказки:
 
 ```powershell
 uv run ingest-parse 123.pdf -o out\scan.md --scan-layout --vision 2>&1 | Tee-Object -FilePath out\scan.log
 uv run python scripts\push_scan_debug.py out
 ```
 
-Вторая команда кладёт `out\scan.md`, `out\scan.log` и `out\media` (рамки, маска, вырезы ручки и таблиц) в приватный репозиторий `Borisserz/bam-bam-bam-scans`. `scan.env` и кэш модели туда не попадают.
+2. Тот же пайплайн после правок. Флаги те же, папка другая:
 
-Тот же прогон с локальной подсказкой Chandra 2. По умолчанию флаг выключен: Chandra не становится постоянным шагом, пока два `scan.md` не сравнены. Буквы Dots в промпт Qwen не входят. Адрес — пустой `SCAN_CHANDRA_URL` в `scan.env`.
+```powershell
+uv run ingest-parse 123.pdf -o out-fixed\scan.md --scan-layout --vision 2>&1 | Tee-Object -FilePath out-fixed\scan.log
+uv run python scripts\push_scan_debug.py out-fixed
+```
+
+3. Подсказка Chandra 2. Рамки ответа режутся по вырезу, который смотрит Qwen. Адрес — пустой `SCAN_CHANDRA_URL` в `scan.env`.
 
 ```powershell
 uv run ingest-parse 123.pdf -o out-chandra\scan-chandra.md --scan-layout --vision --chandra 2>&1 | Tee-Object -FilePath out-chandra\scan-chandra.log
 uv run python scripts\push_scan_debug.py out-chandra
 ```
+
+4. Подсказка olmOCR вместо Chandra. Адрес — пустой `SCAN_OLM_URL` в `scan.env`. `--chandra` и `--olm` вместе не ставить.
+
+```powershell
+uv run ingest-parse 123.pdf -o out-olm\scan-olm.md --scan-layout --vision --olm 2>&1 | Tee-Object -FilePath out-olm\scan-olm.log
+uv run python scripts\push_scan_debug.py out-olm
+```
+
+Каждая вторая команда кладёт `md`, `log` и `media` (рамки, маска, вырезы ручки и таблиц, `debug\scan-NNN-chandra.txt` или `olm.txt`) в приватный репозиторий `Borisserz/bam-bam-bam-scans`. `scan.env` и кэш модели туда не попадают.
 
 ```powershell
 uv run ingest-parse 123.pdf -o out\scan.md --scan-layout --vision
