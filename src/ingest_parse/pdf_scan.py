@@ -114,6 +114,25 @@ def _complete(path: Path, prompt: str, mode: str, options: ScanOptions, cache_di
     return answer
 
 
+def _ask(path: Path, prompt: str, mode: str, options: ScanOptions, cache_dir: Path) -> str:
+    """Один вызов Qwen. Если подсказка не влезла в окно 8192 — тот же вырез без неё."""
+    from ingest_parse.vision import VisionError
+
+    try:
+        return _complete(path, prompt, mode, options, cache_dir)
+    except VisionError as exc:
+        mark = "Подсказка текста."
+        if mark not in prompt or not _context_full(exc):
+            raise
+        print("  hint dropped (context)", flush=True)
+        return _complete(path, prompt[: prompt.find(mark)].rstrip(), f"{mode}-nohint", options, cache_dir)
+
+
+def _context_full(exc: BaseException) -> bool:
+    text = str(exc)
+    return "8192" in text or "exceed_context" in text or "context size" in text
+
+
 def _vision(
     path: Path,
     number: int,
@@ -130,7 +149,7 @@ def _vision(
     from ingest_parse.vision.prompts import build_page_prompt, parse_sections
 
     prompt = with_text_layer(build_page_prompt(kind, number, markers=markers, part=part), letters)
-    return parse_sections(_complete(path, prompt, mode, options, cache_dir or path.parent))
+    return parse_sections(_ask(path, prompt, mode, options, cache_dir or path.parent))
 
 
 def _orienter(options: ScanOptions, number: int, work: Path, cache_dir: Path):
@@ -488,7 +507,7 @@ def _hand_parts(
                 path = tmp / f"scan-{number:03d}-hand-{k}.png"
                 crop.save(path)
             prompt = with_text_layer(build_hand_prompt(), letters.for_box(box) if letters is not None else "")
-            text = _complete(path, prompt, "hand", options, cache_dir).strip()
+            text = _ask(path, prompt, "hand", options, cache_dir).strip()
         except Exception as exc:  # noqa: BLE001 — сбой одной полосы не стирает уже прочитанную страницу
             print(f"  page {number}: pen {k} FAILED {type(exc).__name__}: {exc}", flush=True)
             warnings.warn(f"pen crop failed: {exc}; page {number} keeps the page text", PdfPageWarning, stacklevel=4)
@@ -619,7 +638,7 @@ def _read_table(
     ]
     for image, prompt, try_mode in tries:
         try:
-            answer = _complete(image or _sharper(path, tmp), prompt, try_mode, options, path.parent)
+            answer = _ask(image or _sharper(path, tmp), prompt, try_mode, options, path.parent)
         except VisionError as exc:
             reason = f"vision API failed: {exc}"
             continue

@@ -14,6 +14,7 @@ _OLM = False
 _CHANDRA_MODEL = "chandra"
 _OLM_MODEL = "olmocr"
 _OLM_EDGE = 1288  # длинная сторона, на которой учили olmOCR
+_HINT_LIMIT = 1500  # знаков в промпт Qwen; окно модели 8192, картинка уже занимает большую часть
 _CHANDRA_PROMPT = """
 OCR this image to HTML, arranged as layout blocks. Each layout block should be a div with the data-bbox attribute representing the bounding box of the block in x0 y0 x1 y1 format. Bboxes are normalized 0-1000. The data-label attribute is the label for the block.
 
@@ -72,10 +73,10 @@ class PageLetters:
     def for_box(self, box: Box | None) -> str:
         """Текст, который лежит в рамке. Вся страница — полный ответ. Чужой блок в вырез не кладётся."""
         if box is None or self._covers(box):
-            return self.text
+            return _trim_hint(self.text)
         if self.blocks:
             picked = [text for block, text in self.blocks if _overlaps(block, box)]
-            return "\n".join(picked)
+            return _trim_hint("\n".join(picked))
         if self._ask is None or self._image is None:
             return ""
         if box in self._cache:
@@ -91,7 +92,7 @@ class PageLetters:
         self._cache[box] = text
         if text:
             print(f"  {self.source} crop {crop.size[0]}x{crop.size[1]} chars={len(text)}", flush=True)
-        return text
+        return _trim_hint(text)
 
     def dump(self) -> str:
         lines = [f"source: {self.source or 'off'}", f"chars: {len(self.text)}", f"blocks: {len(self.blocks)}", ""]
@@ -183,6 +184,18 @@ def _fetch(
         return PageLetters(source=source, image=image, ask=ask)
     print(f"  {source} chars={len(text)} blocks={len(blocks)}", flush=True)
     return PageLetters(text, source, blocks, image, ask)
+
+
+def _trim_hint(text: str) -> str:
+    """Повтор вроде «В.В.В.В…» и слишком длинная подсказка не должны выбивать окно Qwen."""
+    if not text:
+        return ""
+    short = re.sub(r"(.{1,12})\1{6,}", r"\1", text)
+    if len(short) <= _HINT_LIMIT:
+        return short
+    cut = short[:_HINT_LIMIT]
+    line = cut.rfind("\n")
+    return cut[:line] if line > _HINT_LIMIT // 2 else cut
 
 
 def _off(reason: str) -> str:
