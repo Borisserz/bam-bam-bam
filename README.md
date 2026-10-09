@@ -9,7 +9,7 @@ uv sync
 New-Item -ItemType Directory -Force out, out-fixed, out-chandra, out-olm
 ```
 
-Если `push_scan_debug.py` пишет `WinError 2`, на ПК нет `gh`. Winget не нужен:
+Если `push_scan_debug.py` пишет `WinError 2`, на ПК нет `gh`. Вход на сайт GitHub это не ставит. Winget не нужен. Вставь блок целиком в том же окне:
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -17,12 +17,17 @@ $dir = "$env:LOCALAPPDATA\gh"
 New-Item -ItemType Directory -Force $dir | Out-Null
 Invoke-WebRequest "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_windows_amd64.zip" -OutFile "$env:TEMP\gh.zip"
 Expand-Archive "$env:TEMP\gh.zip" $dir -Force
-$env:Path = "$env:Path;$dir\bin"
-gh --version
-gh auth login
+$exe = Get-ChildItem $dir -Recurse -Filter gh.exe | Select-Object -First 1
+$env:Path = "$env:Path;$($exe.DirectoryName)"
+& $exe.FullName --version
+gh auth status
 ```
 
-На вопросах `gh auth login`: GitHub.com, HTTPS, браузер.
+Нет строки `gh version` — пришли текст ошибки. `You are not logged in` — тогда `gh auth login` (GitHub.com, HTTPS, браузер). `Logged in to github.com` — сразу:
+
+```powershell
+uv run python scripts\push_scan_debug.py out
+```
 
 1. Без OCR-подсказки:
 
