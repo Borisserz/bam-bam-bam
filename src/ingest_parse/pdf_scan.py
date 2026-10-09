@@ -44,7 +44,7 @@ _PAD_PT = 4.0  # поле вокруг выреза, пункты
 _MAX_ROWS = 10  # строк таблицы в одном куске для VLM
 _TILE_HEIGHT = 1600  # px: таблица без линий выше этого — куски по высоте
 _BAND_FACTOR = 1.5  # страница длиннее 1.5 × max_long_edge читается полосами
-_MARK = re.compile(r"\**\\?\[(FIGURE|TABLE|HAND)\s+(\d+)\\?\]\**")
+_MARK = re.compile(r"\**\\?\[(FIGURE|TABLE|HAND)\s+(\d+)(?:\\?\])?\**")
 _SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}")
 _COLOR = {"figure": "blue", "table": "green", "masked": "gray", "text": "red"}
 _OVER_TEXT = " over-text"  # рисунок поверх текста: на странице не закрашивается
@@ -474,20 +474,25 @@ def _hand_parts(
     parts = {}
     source = page.color if page.color is not None else page.image
     pad = _PAD_PT * page.dpi / 72
-    for use, region in hands:
+    for region, use in hands:
         k = use.split()[1]
-        box = _px(region.box, source.size, pad)
-        crop = source.crop(box)
-        if crop.height < 180:
-            crop = crop.resize((crop.width * 2, crop.height * 2), Image.Resampling.LANCZOS)
-        name = f"debug/scan-{number:03d}-hand-{k}.png"
-        if media is not None:
-            path, _ = media.save_named(crop, name)
-        else:
-            path = tmp / f"scan-{number:03d}-hand-{k}.png"
-            crop.save(path)
-        prompt = with_text_layer(build_hand_prompt(), letters.for_box(box) if letters is not None else "")
-        text = _complete(path, prompt, "hand", options, cache_dir).strip()
+        try:
+            box = _px(region.box, source.size, pad)
+            crop = source.crop(box)
+            if crop.height < 180:
+                crop = crop.resize((crop.width * 2, crop.height * 2), Image.Resampling.LANCZOS)
+            name = f"debug/scan-{number:03d}-hand-{k}.png"
+            if media is not None:
+                path, _ = media.save_named(crop, name)
+            else:
+                path = tmp / f"scan-{number:03d}-hand-{k}.png"
+                crop.save(path)
+            prompt = with_text_layer(build_hand_prompt(), letters.for_box(box) if letters is not None else "")
+            text = _complete(path, prompt, "hand", options, cache_dir).strip()
+        except Exception as exc:  # noqa: BLE001 — сбой одной полосы не стирает уже прочитанную страницу
+            print(f"  page {number}: pen {k} FAILED {type(exc).__name__}: {exc}", flush=True)
+            warnings.warn(f"pen crop failed: {exc}; page {number} keeps the page text", PdfPageWarning, stacklevel=4)
+            continue
         print(
             f"  page {number}: pen {k} box={box} crop={crop.size[0]}x{crop.size[1]} chars={len(text)}",
             flush=True,
@@ -519,6 +524,7 @@ def _figure(path: Path, link: str | None, k: int, number: int, options: ScanOpti
 
     alt = f"Рисунок {k}, страница {number}"
     block = describe_image(path, alt, options.client, options.force, options.max_long_edge).rstrip("\n")
+    block = re.sub(r"\n\*\*Анализ:\*\*.*?(?=\n<!-- vision:end)", "", block, count=1, flags=re.DOTALL)
     return f"{block}\n\n{image_markdown(alt, link)}" if link is not None else block
 
 
@@ -669,9 +675,17 @@ def _table(
     return "\n\n".join(out + misses)
 
 
+def _column_numbers(row: str) -> bool:
+    """Строка «| 1 | 2 | 3 |» — номера столбцов бланка, не товар."""
+    cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+    nums = [cell for cell in cells if cell]
+    return len(nums) >= 2 and nums == [str(i) for i in range(1, len(nums) + 1)]
+
+
 def _join_tables(texts: list[str]) -> str:
     """Куски одной таблицы → одна: шапка — только из первого куска; повтор строки на стыке убирается."""
     lines: list[str] = []
+    seen_numbers = False
     for i, text in enumerate(texts):
         rows = text.strip().splitlines()
         if i:
@@ -679,6 +693,10 @@ def _join_tables(texts: list[str]) -> str:
             if sep is not None:
                 rows = rows[sep + 1 :]
         for row in rows:
+            if _column_numbers(row):
+                if seen_numbers:
+                    continue
+                seen_numbers = True
             if not (lines and row.strip() == lines[-1].strip()):
                 lines.append(row)
     return "\n".join(lines)
@@ -718,8 +736,9 @@ def _block(
     model: str | None,
     layout: bool = False,
 ) -> str:
-    from ingest_parse.vision.markers import render_block
+    from ingest_parse.vision.markers import render_block, settle_markdown
 
+    body = settle_markdown(body)
     kind = _kind(body)
     source = 'source="vision" layout="heron"' if layout else 'source="vision"'
     out = [f'<!-- pdf-scan:begin page="{number}" {source} sha256="{sha}" kind="{kind}" -->', ""]
