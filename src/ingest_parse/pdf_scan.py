@@ -253,9 +253,17 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
         path, link = tmp / f"scan-{number:03d}.png", None
         image.save(path)
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
-    if page.steps:
-        print(f"  page {number}: preprocess {'; '.join(page.steps)}", flush=True)
+    cache_dir = path.parent
+    try:
+        return _page_read(page, number, media, tmp, options, path, link, sha, cache_dir, image)
+    except Exception as exc:  # noqa: BLE001 — сбой после сохранения скана не должен прятать картинку страницы
+        return _failure(number, "page_error", f"{type(exc).__name__}: {exc}", link)
 
+
+def _page_read(
+    page: _Page, number: int, media: MediaWriter | None, tmp: Path, options: ScanOptions,
+    path: Path, link: str | None, sha: str, cache_dir: Path, image: Any,
+) -> str:
     plan = None
     ocr = ""
     if options.layout:
@@ -275,9 +283,9 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
 
     letters = load_letters(page.color or page.image)
     if media is not None and letters.source:
-        path = media.directory / f"debug/scan-{number:03d}-{letters.source}.txt"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(letters.dump(), encoding="utf-8")
+        hint = media.directory / f"debug/scan-{number:03d}-{letters.source}.txt"
+        hint.parent.mkdir(parents=True, exist_ok=True)
+        hint.write_text(letters.dump(), encoding="utf-8")
     hands = [
         (Region("hand", 1.0, box), f"hand {i}") for i, box in enumerate(page.pen or [], 1)
     ]
@@ -289,10 +297,10 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
     crops = [(use, r) for r, use in plan or [] if use.startswith(("figure ", "table "))]
     try:
         if plan is None and not hands:
-            sections = _vision(path, number, options, cache_dir=path.parent, letters=letters.for_box(None))
+            sections = _vision(path, number, options, cache_dir=cache_dir, letters=letters.for_box(None))
         else:
             sections = _page_text(
-                masked, plan or hands, number, options, tmp, path.parent, markers=bool(crops or hands), letters=letters,
+                masked, plan or hands, number, options, tmp, cache_dir, markers=bool(crops or hands), letters=letters,
             )
     except VisionError as exc:
         return _failure(number, "vision_error", str(exc), link)
@@ -301,7 +309,7 @@ def _page_block(pdf: Any, number: int, media: MediaWriter | None, tmp: Path, opt
     if crops:
         parts.update(_crop_parts(page, number, crops, media, tmp, options, letters))
     if hands:
-        parts.update(_hand_parts(page, number, hands, media, tmp, options, path.parent, letters))
+        parts.update(_hand_parts(page, number, hands, media, tmp, options, cache_dir, letters))
     if parts:
         body = _merge(body, parts)
     if not (body or sections):
@@ -539,12 +547,10 @@ def _crop_parts(
 
 
 def _figure(path: Path, link: str | None, k: int, number: int, options: ScanOptions) -> str:
-    from ingest_parse.vision.enrich import describe_image
-
+    """Картинка остаётся в файле. В Qwen её не шлём: печать и штрихкод он дописывает выдумкой."""
+    del path, options
     alt = f"Рисунок {k}, страница {number}"
-    block = describe_image(path, alt, options.client, options.force, options.max_long_edge).rstrip("\n")
-    block = re.sub(r"\n\*\*Анализ:\*\*.*?(?=\n<!-- vision:end)", "", block, count=1, flags=re.DOTALL)
-    return f"{block}\n\n{image_markdown(alt, link)}" if link is not None else block
+    return image_markdown(alt, link) if link is not None else ""
 
 
 _LABEL_PREFIX = re.compile(r"^\s*\**\s*(Описание|Текст с изображения|Анализ)\s*:?\s*\**\s*:?\s*")
@@ -692,6 +698,107 @@ def _table(
     )
     out = [_join_tables(texts)] if texts else []
     return "\n\n".join(out + misses)
+
+
+def _hand_columns(table: str) -> tuple[int, list[int]]:
+    """Колонка «Наименование» и колонка ставки. Если шапка не распознана — берём первую."""
+    for line in table.splitlines():
+        if not line.strip().startswith("|") or _SEPARATOR.match(line):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        name = next((i for i, cell in enumerate(cells) if "наименован" in cell.casefold()), 0)
+        cols = [name]
+        for i, cell in enumerate(cells):
+            if "ставк" in cell.casefold() and i not in cols:
+                cols.append(i)
+        return name, cols
+    return 0, [0]
+
+
+def _cell_ink(image: Any, box: tuple[int, int, int, int], min_ink: int = 80) -> bool:
+    x0, y0, x1, y1 = box
+    x0, y0, x1, y1 = x0 + 3, y0 + 3, x1 - 3, y1 - 3
+    if x1 <= x0 or y1 <= y0:
+        return False
+    gray = np.asarray(image.convert("L") if getattr(image, "mode", "L") != "L" else image)
+    return int((gray[y0:y1, x0:x1] < 128).sum()) >= min_ink
+
+
+def _ask_cell(image: Any, box: tuple[int, int, int, int], prompt: str, options: ScanOptions) -> str:
+    crop = image.crop(box).convert("L")
+    if crop.height and crop.height < 280:
+        scale = min(4, math.ceil(280 / crop.height))
+        crop = crop.resize((max(1, crop.width * scale), crop.height * scale), Image.Resampling.LANCZOS)
+    with tempfile.TemporaryDirectory(prefix="ingest-cell-") as tmp:
+        path = Path(tmp) / "cell.png"
+        crop.save(path)
+        text = _complete(path, prompt, "cell", options, Path(tmp)).strip()
+    return text.splitlines()[0].strip() if text else ""
+
+
+def _reread_cells(
+    image: Any, columns: list[int], rows: list[tuple[int, int]], table: str, options: ScanOptions,
+) -> str:
+    """Крупный перечит ячейки. В обычный прогон не включён: склейка по счётчику сажает имя не в ту строку."""
+    if options.client is None or len(columns) < 2 or not rows:
+        return table
+    from ingest_parse.vision.prompts import build_cell_prompt
+
+    prompt = build_cell_prompt()
+    name_col, cols = _hand_columns(table)
+    cols = [col for col in cols if col + 1 < len(columns)]
+    read: list[dict[int, str]] = []
+    for top, bottom in rows:
+        words: dict[int, str] = {}
+        for col in cols:
+            box = (columns[col], top, columns[col + 1], bottom)
+            if not _cell_ink(image, box):
+                continue
+            word = _ask_cell(image, box, prompt, options)
+            if word:
+                words[col] = word
+        if words.get(name_col, "").replace(" ", "").isdigit():
+            continue
+        if words:
+            read.append(words)
+    return _splice_cells(table, read, name_col)
+
+
+def _total_row(line: str) -> bool:
+    cells = [cell.strip().casefold().strip(".") for cell in line.strip().strip("|").split("|")]
+    head = cells[0] if cells else ""
+    return head.startswith(("итого", "всего"))
+
+
+def _splice_cells(table: str, read: list[dict[int, str]], name_col: int = 0) -> str:
+    """Подставляет прочитанные ячейки в строки, где название не пустое. Лишние строки таблицы не трогает."""
+    lines = table.splitlines()
+    seen_sep = False
+    used = 0
+    out: list[str] = []
+    for line in lines:
+        if not seen_sep:
+            out.append(line)
+            if _SEPARATOR.match(line):
+                seen_sep = True
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")] if line.strip().startswith("|") else []
+        name = cells[name_col] if name_col < len(cells) else ""
+        if (
+            not cells
+            or _column_numbers(line)
+            or _total_row(line)
+            or not name
+            or used >= len(read)
+        ):
+            out.append(line)
+            continue
+        for col, word in read[used].items():
+            if col < len(cells):
+                cells[col] = word
+        used += 1
+        out.append("| " + " | ".join(cells) + " |")
+    return "\n".join(out)
 
 
 def _column_numbers(row: str) -> bool:

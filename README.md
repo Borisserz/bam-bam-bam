@@ -1,5 +1,16 @@
 # ingest-parse
 
+Финальный прогон. Папка проекта, `123.pdf` замени на свой файл. Без `--chandra` и без `--olm`. В `scan.env` строка `INGEST_VISION_REASONING=off`. Красный текст после `2>&1` — это stderr PowerShell, не падение.
+
+```powershell
+git checkout main
+git pull
+uv sync
+New-Item -ItemType Directory -Force out-fixed
+uv run ingest-parse 123.pdf -o out-fixed\scan.md --scan-layout --vision 2>&1 | Tee-Object -FilePath out-fixed\scan.log
+uv run python scripts\push_scan_debug.py out-fixed
+```
+
 Команды ниже. Папка проекта, `123.pdf` замени на свой файл. Красный текст после `2>&1` — это stderr PowerShell, не падение.
 
 ```powershell

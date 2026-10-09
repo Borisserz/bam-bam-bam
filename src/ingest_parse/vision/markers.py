@@ -18,6 +18,7 @@ def _safe(value: str) -> str:
 
 _FENCE = re.compile(r"^\s*```")
 _PIPES = re.compile(r"^\s*\|[\s|]*$")
+_BLANKS = re.compile(r"(?:\\_|_){12,}")
 
 
 def settle_markdown(text: str) -> str:
@@ -25,6 +26,7 @@ def settle_markdown(text: str) -> str:
     kept: list[str] = []
     run = 0
     for line in text.splitlines():
+        line = _BLANKS.sub("____", line)
         if _FENCE.match(line):
             run = 0
             continue
