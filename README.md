@@ -1,22 +1,30 @@
 # ingest-parse
 
-Ветка одна: `main`. Адреса лежат в `scan.env` в папке проекта: Qwen уже вписан.
-Один раз впиши туда `SCAN_DOTS_URL` (адрес dots). В консоль переменные писать не нужно.
+Команды ниже. Папка проекта, `123.pdf` замени на свой файл. Красный текст после `2>&1` — это stderr PowerShell, не падение.
 
 ```powershell
 git checkout main
 git pull
 uv sync
+New-Item -ItemType Directory -Force out, out-fixed, out-chandra, out-olm
 ```
 
-Весь пайплайн: Heron + dots + линии таблиц + чернила, затем Qwen. Текст — `out\scan.md`, рамки — `out\media\123\debug\`.
-Тот же запуск для `.pdf`, `.jpg`, `.jpeg`, `.png`, `.tif`, `.tiff`, `.webp`, `.bmp`: поворот из телефона (EXIF) применяется сам, лист не раздувается из‑за ложных 72 dpi.
-В консоли на странице: `preprocess`, `dots`, `pen lines=K`, для каждой полосы ручки `pen K box= crop= chars=`, для таблицы `table K pieces= chars=`.
-Chandra и olmOCR выключены, пока флага нет. Буквы Dots в промпт Qwen не входят.
+Если `push_scan_debug.py` пишет `WinError 2`, на ПК нет `gh`. Winget не нужен:
 
-Четыре прогона. Папки разные, чтобы в приватном репозитории лежали все четыре. Сравниваем итоговые `md`.
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$dir = "$env:LOCALAPPDATA\gh"
+New-Item -ItemType Directory -Force $dir | Out-Null
+Invoke-WebRequest "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_windows_amd64.zip" -OutFile "$env:TEMP\gh.zip"
+Expand-Archive "$env:TEMP\gh.zip" $dir -Force
+$env:Path = "$env:Path;$dir\bin"
+gh --version
+gh auth login
+```
 
-1. Как есть, без OCR-подсказки:
+На вопросах `gh auth login`: GitHub.com, HTTPS, браузер.
+
+1. Без OCR-подсказки:
 
 ```powershell
 uv run ingest-parse 123.pdf -o out\scan.md --scan-layout --vision 2>&1 | Tee-Object -FilePath out\scan.log
@@ -30,21 +38,27 @@ uv run ingest-parse 123.pdf -o out-fixed\scan.md --scan-layout --vision 2>&1 | T
 uv run python scripts\push_scan_debug.py out-fixed
 ```
 
-3. Подсказка Chandra 2. Рамки ответа режутся по вырезу, который смотрит Qwen. Адрес — пустой `SCAN_CHANDRA_URL` в `scan.env`.
+3. Chandra. В `scan.env` строка `SCAN_CHANDRA_URL=http://127.0.0.1:8000/v1`. Если модель называется не `chandra`, добавь `SCAN_CHANDRA_MODEL=имя`. В логе должно быть `chandra chars=`.
 
 ```powershell
 uv run ingest-parse 123.pdf -o out-chandra\scan-chandra.md --scan-layout --vision --chandra 2>&1 | Tee-Object -FilePath out-chandra\scan-chandra.log
 uv run python scripts\push_scan_debug.py out-chandra
 ```
 
-4. Подсказка olmOCR вместо Chandra. Адрес — пустой `SCAN_OLM_URL` в `scan.env`. `--chandra` и `--olm` вместе не ставить.
+4. olmOCR вместо Chandra. В `scan.env` строка `SCAN_OLM_URL=http://127.0.0.1:8000/v1`. Модель по умолчанию `olmocr`. `--chandra` и `--olm` вместе не ставить.
 
 ```powershell
 uv run ingest-parse 123.pdf -o out-olm\scan-olm.md --scan-layout --vision --olm 2>&1 | Tee-Object -FilePath out-olm\scan-olm.log
 uv run python scripts\push_scan_debug.py out-olm
 ```
 
-Каждая вторая команда кладёт `md`, `log` и `media` (рамки, маска, вырезы ручки и таблиц, `debug\scan-NNN-chandra.txt` или `olm.txt`) в приватный репозиторий `Borisserz/bam-bam-bam-scans`. `scan.env` и кэш модели туда не попадают.
+Вторая строка каждого прогона кладёт `md`, `log` и `media` в приватный репозиторий `Borisserz/bam-bam-bam-scans`. `scan.env` и кэш модели туда не попадают.
+
+Ветка одна: `main`. Адреса лежат в `scan.env`: Qwen уже вписан. Один раз впиши туда `SCAN_DOTS_URL`. В консоль переменные писать не нужно.
+Весь пайплайн: Heron + dots + линии таблиц + чернила, затем Qwen. Текст — `out\scan.md`, рамки — `out\media\123\debug\`.
+Тот же запуск для `.pdf`, `.jpg`, `.jpeg`, `.png`, `.tif`, `.tiff`, `.webp`, `.bmp`: поворот из телефона (EXIF) применяется сам, лист не раздувается из‑за ложных 72 dpi.
+В консоли на странице: `preprocess`, `dots`, `pen lines=K`, для каждой полосы ручки `pen K box= crop= chars=`, для таблицы `table K pieces= chars=`.
+Chandra и olmOCR выключены, пока флага нет. Буквы Dots в промпт Qwen не входят.
 
 ```powershell
 uv run ingest-parse 123.pdf -o out\scan.md --scan-layout --vision
