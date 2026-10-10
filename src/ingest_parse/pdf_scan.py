@@ -502,8 +502,9 @@ def _hand_parts(
     source = page.color if page.color is not None else page.image
     pad = _PAD_PT * page.dpi / 72
     for region, use in hands:
-        k = use.split()[1]
+        k = "?"
         try:
+            k = use.split()[1]
             box = _px(region.box, source.size, pad)
             crop = source.crop(box)
             if crop.height < 180:
